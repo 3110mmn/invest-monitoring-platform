@@ -6,6 +6,27 @@
 [Alembic migration](../../backend/migrations/versions/)、列定義の正本は
 [`schema-data-dictionary.md`](schema-data-dictionary.md)です。
 
+## 共通意思決定モデルとの対応
+
+本プロジェクトは、個人開発全体で共通する
+`Context → Observation → Assessment → Decision → Action → Outcome → Learn`の閉ループを、
+投資判断へ具体化します。共通モデル自体はプロジェクト外で管理し、この文書では投資ドメイン固有の
+対応と、共通モデルを実装可能なデータ責務へ分解した結果だけを定義します。
+
+| 共通モデル | 投資判断プラットフォームでの対応 |
+|---|---|
+| Context | 投資方針、戦略、目的、制約、判断主体、評価時点 |
+| Observation | 株価、財務、開示、イベント、およびそれらの取得時点・来歴 |
+| Derived | リターン、成長率、ボラティリティ、ファクター等の再計算可能な値 |
+| Assessment | テーマ・銘柄・Evidenceのバージョン付き評価、予測、スコア |
+| Decision | 採用、見送り、売買など、候補から何を選んだか |
+| Action | 発注、取消、その他の実行指示と実行行為 |
+| Outcome | 約定、損益、状態変化、仮説の事後的な帰結 |
+| Learn | 予測・判断・結果の差を検証し、評価定義やルールを更新する処理 |
+
+共通モデルは概念上の正本、コード・Alembic・この文書は投資プロジェクトで採用済みの実装上の正本です。
+両者に差がある場合、共通モデルへ機械的に合わせて既存実装を変更せず、差分と移行要否を先に評価します。
+
 
 
 ## 設計原則
@@ -22,13 +43,115 @@
 外部提供者が加工した値でも、この基盤が外部入力として取得したものはObservedとします。
 自基盤内で生成した値だけをDerivedとします。
 
+## 保存先の責務分離
+
+上の6層は**意味の境界**です。これとは別に、**保存先の境界**を持ちます。両者は独立しており、
+同じObservedでも置き場所が分かれます。
+
+| | PostgreSQL | GCS Parquet |
+|---|---|---|
+| 役割 | Operational（アプリケーション状態を管理する） | Observed / Analytical（履歴を蓄積して参照・分析する） |
+| 置くもの | Master、戦略、テーマ、監視対象、設定、取込メタデータ | 価格・財務履歴、全市場のObserved、Derived、mart |
+| アクセス | 参照と更新。整合性制約が効く | 追記中心。列指向でスキャンする |
+| 実装状況 | 実装済み | 未実装 |
+
+**判定基準は「自分のデータか、外部データか」ではありません。** 外部由来でも、`data_source` や
+「この銘柄を監視するか」のように**現在の状態を管理するもの**はPostgreSQLに置きます。逆に自分が
+生成したデータでも、大量に追記して分析するだけのものはParquetが適します。
+
+問うのは次の2点です。
+
+1. **状態として管理し、更新し、整合性を保つ必要があるか** → PostgreSQL
+2. **大量の履歴を追記し、横断して集計したいか** → Parquet
+
+この分離により、PostgreSQLはWebアプリケーションが管理する状態へ限定できます。価格・財務などの
+外部Observedは監視対象分も含めてGCS Parquetへ集約し、DuckDB経由で参照します。Assessment / Decision /
+Outcomeを追加するときは、状態と関係を持つ本体をPostgreSQL側に置き、その計算入力・特徴量・大量履歴を
+Parquet側に置きます。
+
+なお**Parquetは正本ではありません**。原本はGCSへイミュータブルに保存したrawであり、Parquetは
+rawから再生成できる状態を保ちます。
+
+### 目標の物理データフロー
+
+全市場・長期履歴を扱う段階では、価格・財務の本体をPostgreSQLへ無制限に蓄積せず、rawと
+正規化済みParquetをGCSへ保存します。DuckDBは永続化先ではなく、GCS上のParquetを読み取る
+参照・分析エンジンとして利用します。FastAPIはPostgreSQLのアプリケーション状態とDuckDBの価格・財務を
+API層で統合し、Next.jsへ同一の契約で提供します。
+
+```mermaid
+flowchart LR
+    Sources["J-Quants / external APIs"]
+    Fetch["Fetch<br/>retry / rate limit"]
+    Raw[("GCS raw<br/>JSON.gz / immutable")]
+    Transform["Normalize / Validate"]
+    AppDB[("PostgreSQL<br/>Strategy / Theme / Target")]
+    Curated[("GCS lake/curated<br/>Parquet")]
+    DuckDB["DuckDB<br/>read-only query engine"]
+    Analysis["Analysis / Derived / Mart"]
+    Marts[("GCS lake/marts<br/>Parquet / optional")]
+    API["FastAPI"]
+    Web["Next.js"]
+
+    Sources --> Fetch --> Raw
+    Raw --> Transform
+    Transform --> Curated
+    Transform -->|"取込メタデータ"| AppDB
+    AppDB -->|"戦略・テーマ・監視対象"| API
+    Curated --> DuckDB
+    DuckDB -->|"監視対象の価格・財務"| API
+    API --> Web
+    DuckDB --> Analysis
+    Analysis --> Marts
+    Marts --> DuckDB
+```
+
+| 保存・実行先 | 責務 | 正本性 |
+|---|---|---|
+| GCS `raw/` | APIレスポンス原本、取得時点の証跡、再処理元 | 取得原本・証跡の正本 |
+| GCS `lake/curated/` | 型・識別子・時点を統一した全市場の価格・財務Parquet | rawから再生成可能な分析用データセット |
+| GCS `lake/marts/` | リターン、期間集計、ファクター等の再計算可能な派生データ | curatedから再生成可能。必要になってから追加 |
+| PostgreSQL | Master、戦略、テーマ、監視対象、ユーザー入力、関係、設定、取込メタデータ | アプリケーション状態の正本。価格・財務は持たない |
+| DuckDB | Parquetの絞り込み、結合、集計 | 状態を持たない。正本にしない |
+| FastAPI | PostgreSQLとDuckDBの結果をWeb向けAPI契約へ統合 | 保存先ではなく統合境界 |
+
+画面表示では、PostgreSQLから戦略、テーマ、投資対象、監視対象と外部識別子を取得し、その識別子と期間を
+条件にDuckDBでcuratedまたはmartsの価格・財務を読みます。両データストアを直接JOINするのではなく、
+FastAPIのService層が識別子を受け渡してレスポンスを構成します。RouterへSQLや分析ロジックを直接置かず、
+PostgreSQLはRepository、DuckDBは分析Query Serviceへ委譲します。
+
+rawのJSONやCSVを画面や分析から直接検索しません。分析は列指向のParquetを対象とし、銘柄別・日別の
+細粒度ファイルを大量に作らず、データセットの特性に応じて年・月等でpartitionし、必要に応じて
+compactします。頻繁に使う横断集計はリクエストごとに全履歴を走査せず、martsとして事前計算します。
+
+### 現行構成からの移行原則
+
+移行は置換ではなく、次の順序で段階的に行っています。
+
+| | 段階 | 状態 |
+|---|---|---|
+| 1 | rawから`lake/`のParquetを冪等に生成する | 完了 |
+| 2 | DuckDBの集計結果をPostgreSQLの既存Observedと照合する | 完了（`reconcile_parquet.py`、乖離の中央値0.00%） |
+| 3 | DuckDBの読み出しをFastAPIへ追加し、既存のAPI契約で同じ結果を返す | 完了 |
+| 4 | Webのチャート・財務表示をDuckDB経路へ切り替える | 完了 |
+| 5 | PostgreSQLへの価格・財務の日次ロードを停止し、Observedテーブルを廃止する | **未了** |
+| 6 | DuckDBでDerivedとmartを生成する | 着手（`daily_return`） |
+
+5を最後に回しているのは、突合の基準線を残すためです。PostgreSQL側の価格が止まると、
+Parquetが正しいことを確認する足場が無くなります。読み出しの切り替え（3・4）と、
+書き込みの停止（5）は別の判断として扱います。
+
+GCSへの書き込みはversioned pathまたはmanifestで公開単位を切り替え、生成途中のデータをDuckDBから
+参照させません。Parquetの公開に失敗してもrawから冪等に再実行できるようにし、成功・失敗と公開versionを
+PostgreSQLの取込メタデータへ記録します。
+
 ## 現行スキーマとの対応
 
-| 論理層 | 現在の物理テーブル・状態 |
+| 論理層 | 現在の物理配置 |
 |---|---|
-| Master | `investment_target`, `theme`, `strategy`, `data_source`, `investment_target_identifier` |
-| Observed | `market_price_observation`, `financial_disclosure`, `financial_summary` |
-| Derived | 未実装。分析要件が確定してからmart等で追加 |
+| Master | PostgreSQL: `investment_target`, `theme`, `strategy`, `data_source`, `investment_target_identifier` |
+| Observed | GCS Parquet: `lake/observed/market_price`, `lake/observed/financial_summary`。PostgreSQLの `market_price_observation` / `financial_disclosure` / `financial_summary` は**読み手が無く、廃止待ち** |
+| Derived | `backend/analytics/derived/*.sql`。計算定義が正本で、結果は保存せず都度計算する |
 | Assessment | 未実装。独立した評価領域として追加 |
 | Decision | 未実装。Assessmentとは分離して追加 |
 | Outcome | 未実装。注文・約定等のFactとして追加 |

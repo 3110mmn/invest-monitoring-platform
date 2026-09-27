@@ -40,3 +40,30 @@ class PlanWindow:
         if start > end:
             return None
         return start, end
+
+def business_days(start: date, end: date, *, limit: int | None = None) -> list[str]:
+    """start〜endの平日をISO文字列で返す。休場日はAPIが空を返すので除外しない。
+
+    土日は市場が開かないと確定しているため投げない。祝日はカレンダーを持たないと
+    判別できず、空振り1回のコストよりカレンダー管理のコストが上回るため許容する。
+    """
+    days = [
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range((end - start).days + 1)
+        if (start + timedelta(days=offset)).weekday() < 5
+    ]
+    return days[:limit] if limit is not None else days
+
+
+def catch_up_range(
+    last_archived: date | None, newest_available: date
+) -> tuple[date, date] | None:
+    """前回アーカイブ済みの翌日から、取得可能な最新日までを返す。
+
+    追いつくべき日が無ければNone。失敗した日を穴として残さないため、日次実行は
+    「最新日だけ」ではなく「前回の続きから」取得する。
+    """
+    start = last_archived + timedelta(days=1) if last_archived else newest_available
+    if start > newest_available:
+        return None
+    return start, newest_available

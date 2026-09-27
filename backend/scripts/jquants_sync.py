@@ -12,7 +12,7 @@ from app.config import settings
 from app.database import Connection, connect_database
 from app.etl.loaders import active_jquants_codes
 from app.etl.normalizers import target_key_to_jpx_code
-from app.etl.plan_window import PlanWindow
+from app.etl.plan_window import PlanWindow, business_days, catch_up_range
 from app.etl.runtime import build_jquants_pipeline
 
 
@@ -84,6 +84,59 @@ def sync_missing_masters(pipeline, conn: Connection, *, date: str | None = None)
     return succeeded, failed
 
 
+
+def resolve_archive_dates(
+    conn: Connection,
+    args: argparse.Namespace,
+    job_type: str,
+    parser: argparse.ArgumentParser,
+) -> list[str] | None:
+    """アーカイブ対象の営業日を決める。取得済みなら None を返す。
+
+    価格と財務で同じ規則にする。片方だけ窓の扱いが違うと、取りこぼしの原因になる。
+    """
+    window = PlanWindow(
+        settings.jquants_history_lag_days, settings.jquants_history_years
+    )
+    today = date.today()
+
+    if args.date:
+        return [args.date]
+
+    if args.catch_up:
+        # 失敗した日を穴として残さない。前回の続きから最新日まで埋める。
+        _, newest = window.bounds(today)
+        row = conn.execute(
+            """
+            SELECT MAX(requested_to) AS last_date FROM ingestion_run
+            WHERE job_type = ? AND status = 'succeeded'
+            """,
+            (job_type,),
+        ).fetchone()
+        last_archived = row["last_date"] if row else None
+        pending = catch_up_range(last_archived, newest)
+        if pending is None:
+            print(f"アーカイブは最新です（{last_archived} まで取得済み）")
+            return None
+        dates = business_days(*pending, limit=args.max_days)
+        print(f"前回: {last_archived} / 最新: {newest} → {len(dates)}営業日を取得")
+        return dates
+
+    # 既定はプランが提供する全期間。today から遡ると、窓は newest から2年なので
+    # 最古側が取り漏れる。窓の端をそのまま使う。
+    oldest, newest = window.bounds(today)
+    end = date.fromisoformat(args.date_to) if args.date_to else newest
+    start = date.fromisoformat(args.date_from) if args.date_from else oldest
+    if start > end:
+        parser.error("--fromは--to以前の日付を指定してください")
+    clamped = window.clamp(start, end, today=today)
+    if clamped is None:
+        parser.error("指定した期間はプランの提供範囲と重なりません")
+    start, end = clamped
+    print(f"プランの窓に合わせた取得期間: {start} 〜 {end}")
+    return business_days(start, end)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="J-Quants銘柄マスタ・日次株価取込")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -122,6 +175,40 @@ def main() -> None:
     prices_period.add_argument("--from", dest="date_from", type=iso_date, help="開始日 YYYY-MM-DD")
     prices.add_argument("--to", dest="date_to", type=iso_date, help="終了日 YYYY-MM-DD（省略時は本日）")
 
+    archive = subparsers.add_parser(
+        "archive-prices",
+        help="全銘柄の日次四本値をrawへ保存する。PostgreSQLへはロードしない",
+    )
+    archive_period = archive.add_mutually_exclusive_group()
+    archive_period.add_argument("--date", help="単日 YYYY-MM-DD")
+    archive_period.add_argument("--all", action="store_true", help="プランが提供する全期間")
+    archive_period.add_argument(
+        "--catch-up",
+        action="store_true",
+        help="前回アーカイブ済みの翌日から、プランが提供する最新日まで追いつく（日次用）",
+    )
+    archive.add_argument(
+        "--max-days", type=int, default=30, help="--catch-up で一度に取得する最大日数"
+    )
+    archive.add_argument("--from", dest="date_from", type=iso_date, help="開始日 YYYY-MM-DD")
+    archive.add_argument("--to", dest="date_to", type=iso_date, help="終了日 YYYY-MM-DD")
+
+    archive_fin = subparsers.add_parser(
+        "archive-financials",
+        help="全銘柄の財務サマリーをrawへ保存する。PostgreSQLへはロードしない",
+    )
+    archive_fin_period = archive_fin.add_mutually_exclusive_group()
+    archive_fin_period.add_argument("--date", help="単日 YYYY-MM-DD")
+    archive_fin_period.add_argument("--all", action="store_true", help="プランが提供する全期間")
+    archive_fin_period.add_argument(
+        "--catch-up", action="store_true", help="前回アーカイブ済みの翌日から追いつく（日次用）"
+    )
+    archive_fin.add_argument("--from", dest="date_from", type=iso_date, help="開始日")
+    archive_fin.add_argument("--to", dest="date_to", type=iso_date, help="終了日")
+    archive_fin.add_argument(
+        "--max-days", type=int, default=30, help="--catch-up で一度に取得する最大日数"
+    )
+
     args = parser.parse_args()
     if args.command == "prices":
         if args.years is not None and args.years < 1:
@@ -149,6 +236,22 @@ def main() -> None:
                     )
                 return
             result = pipeline.sync_master(code=args.code, date=args.date)
+        elif args.command == "archive-prices":
+            dates = resolve_archive_dates(
+                conn, args, "jquants_market_prices_archive_v1", parser
+            )
+            if dates is None:
+                return
+            print(f"対象営業日（概算）: {len(dates)}日")
+            result = pipeline.archive_market_prices(dates)
+        elif args.command == "archive-financials":
+            dates = resolve_archive_dates(
+                conn, args, "jquants_financial_archive_v1", parser
+            )
+            if dates is None:
+                return
+            print(f"対象営業日（概算）: {len(dates)}日")
+            result = pipeline.archive_financials(dates)
         elif args.command == "financials":
             if args.latest:
                 # プランが提供する最新日。遅延のないプランでは当日になる。

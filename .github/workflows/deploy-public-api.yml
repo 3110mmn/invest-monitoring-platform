@@ -17,11 +17,17 @@ permissions:
   contents: read
 
 env:
-  GCP_PROJECT_ID: "${{ vars.GCP_PROJECT_ID }}"
-  ARTIFACT_REPOSITORY: "${{ vars.ARTIFACT_REPOSITORY }}"
-  CLOUD_RUN_SERVICE: "${{ vars.PUBLIC_API_SERVICE }}"
-  DATABASE_SECRET: "${{ vars.PUBLIC_DATABASE_SECRET }}"
-  RUNTIME_SERVICE_ACCOUNT: "${{ vars.PUBLIC_API_RUNTIME_SERVICE_ACCOUNT }}"
+  GCP_PROJECT_ID: invest-dwh
+  GCP_PROJECT_NUMBER: "540015602390"
+  ARTIFACT_REPOSITORY: invest-monitoring
+  CLOUD_RUN_SERVICE: invest-monitoring-public-api
+  FRONTEND_SERVICE: invest-monitoring-frontend
+  DATABASE_SECRET: invest-database-reader-url
+  RUNTIME_SERVICE_ACCOUNT: invest-public-api-runtime@invest-dwh.iam.gserviceaccount.com
+  # 価格と財務は分析層からしか読まない。公開デモはsyntheticなParquetを読む。
+  # このサービスアカウントは実データのバケットに権限を持たないため、宛先を
+  # 取り違えても実データは読めない。安全を環境変数の正しさに依存させない。
+  DEMO_PARQUET_LAKE: "gs://invest-demo-lake/lake"
 
 jobs:
   deploy:
@@ -74,7 +80,7 @@ jobs:
             --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
             --port 8080 \
             --allow-unauthenticated \
-            --set-env-vars DATABASE_READ_ONLY=true,MANAGEMENT_API_ENABLED=false \
+            --set-env-vars "DATABASE_READ_ONLY=true,MANAGEMENT_API_ENABLED=false,PARQUET_LAKE=${DEMO_PARQUET_LAKE}" \
             --set-secrets "DATABASE_URL=${DATABASE_SECRET}:latest" \
             --min-instances 0 \
             --max-instances 1 \
@@ -82,6 +88,25 @@ jobs:
             --cpu 1 \
             --concurrency 40 \
             --timeout 30
+
+      # `gcloud run deploy --set-env-vars` は既存の環境変数を置き換えるため、Frontendの
+      # deploy時に設定したCORS_ORIGINSも消える。APIを単独で再deployしても画面を壊さないよう、
+      # 毎回ここで現在のFrontend URLを解決して設定し直す。
+      - name: Allow public frontend origins
+        shell: bash
+        run: |
+          set -euo pipefail
+          frontend_status_url="$(gcloud run services describe "${FRONTEND_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${{ inputs.region }}" \
+            --format='value(status.url)')"
+          frontend_regional_url="https://${FRONTEND_SERVICE}-${GCP_PROJECT_NUMBER}.${{ inputs.region }}.run.app"
+          gcloud run services update "${CLOUD_RUN_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${{ inputs.region }}" \
+            --update-env-vars "^@^CORS_ORIGINS=[\"${frontend_status_url}\",\"${frontend_regional_url}\"]" >/dev/null
+          echo "FRONTEND_STATUS_URL=${frontend_status_url}" >> "${GITHUB_ENV}"
+          echo "FRONTEND_REGIONAL_URL=${frontend_regional_url}" >> "${GITHUB_ENV}"
 
       - name: Verify public endpoints
         shell: bash
@@ -98,4 +123,10 @@ jobs:
           test "${actual_service_account}" = "${RUNTIME_SERVICE_ACCOUNT}"
           curl --fail --show-error --silent "${url}/health"
           curl --fail --show-error --silent "${url}/ready"
+          for origin in "${FRONTEND_STATUS_URL}" "${FRONTEND_REGIONAL_URL}"; do
+            cors_headers="$(curl --fail --show-error --silent --include \
+              --header "Origin: ${origin}" \
+              "${url}/api/themes/summary")"
+            echo "${cors_headers}" | grep -qi "access-control-allow-origin: ${origin}"
+          done
           echo "Public API: ${url}" >> "${GITHUB_STEP_SUMMARY}"

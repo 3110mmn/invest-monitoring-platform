@@ -33,6 +33,10 @@ def test_readiness_without_ingestion_history_is_ready(client):
     assert response.json() == {
         "status": "ready",
         "database": "ok",
+        # 価格は分析層からしか読まないので、到達性を readiness に出す。
+        "analytics": "ok",
+        # テストは専用DB（invest_test）に対して実行される。
+        "database_environment": "test",
         "latest_ingestions": [],
     }
 
@@ -60,6 +64,8 @@ def test_readiness_reports_latest_status_for_each_job_type(client, db):
     assert response.json() == {
         "status": "degraded",
         "database": "ok",
+        "analytics": "ok",
+        "database_environment": "test",
         "latest_ingestions": [
             {
                 "job_type": "master",
@@ -241,64 +247,25 @@ def test_asset_price_days_are_bounded(client):
     assert client.get(f"/api/investment-targets/{target_id}/prices?days=3651").status_code == 422
 
 
-def test_asset_price_endpoints_have_typed_responses(client, db):
+def test_price_endpoints_return_nothing_when_the_analytics_layer_is_empty(client):
+    """価格はPostgreSQLから読まない。
+
+    PostgreSQLへ観測を入れても価格は返らない。分析層が空なら空で返る。値そのものの
+    検証は `test_price_source.py` がParquetを与えて行う。この経路が1本であることは、
+    公開デモと管理APIが同じコードを通す前提なので、ここで固定する。
+    """
     target_id = client.post(
         "/api/investment-targets/",
         json={"target_key": "1306.T", "target_name": "TOPIX ETF", "target_type": "etf"},
     ).json()["target_id"]
-    source_id = db.execute(
-        "INSERT INTO data_source (source_key, source_name) VALUES (?, ?)",
-        ("jquants-price", "J-Quants"),
-    ).lastrowid
-    db.execute(
-        """
-        INSERT INTO market_price_observation (
-            target_id, source_id, obs_date, open_price, high_price, low_price,
-            close_price, volume, price_basis, note
-        ) VALUES (?, ?, date('now'), ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (target_id, source_id, 100.0, 110.0, 90.0, 105.0, 1000.0, "adjusted", "daily"),
-    )
 
-    history = client.get(f"/api/investment-targets/{target_id}/prices?days=1")
+    history = client.get(f"/api/investment-targets/{target_id}/prices?days=30")
     latest = client.get("/api/investment-targets/latest-prices")
 
     assert history.status_code == 200
-    assert history.json()[0]["volume"] == 1000.0
-    assert history.json()[0]["source_key"] == "jquants-price"
-    assert history.json()[0]["price_basis"] == "adjusted"
+    assert history.json() == []
     assert latest.status_code == 200
-    assert latest.json()[0]["latest_date"] == history.json()[0]["obs_date"]
-
-
-def test_price_history_is_ascending_by_obs_date(client, db):
-    """価格履歴は古い順で返す。
-
-    画面は先頭を期間の開始日、末尾を最新として扱うため、この並び順はAPIの契約である。
-    `ORDER BY` を変えると表示が逆転するので、ここで固定する。
-    """
-    source_id = db.execute(
-        "INSERT INTO data_source (source_key, source_name) VALUES ('yfinance', 'yfinance')"
-    ).lastrowid
-    target_id = db.execute(
-        "INSERT INTO investment_target (target_key, target_name, target_type) "
-        "VALUES ('7203.T', 'トヨタ', 'individual_stock')"
-    ).lastrowid
-    # 意図的に新しい日付から挿入する
-    for obs_date, close in (("2026-09-11", 300.0), ("2026-09-09", 100.0), ("2026-09-10", 200.0)):
-        db.execute(
-            "INSERT INTO market_price_observation "
-            "(target_id, source_id, obs_date, close_price, price_basis) "
-            "VALUES (?, ?, ?, ?, 'adjusted')",
-            (target_id, source_id, obs_date, close),
-        )
-    db.commit()
-
-    body = client.get(f"/api/investment-targets/{target_id}/prices?days=3650").json()
-
-    assert [row["obs_date"] for row in body] == ["2026-09-09", "2026-09-10", "2026-09-11"]
-    assert body[0]["close_price"] == 100.0
-    assert body[-1]["close_price"] == 300.0
+    assert latest.json() == []
 
 
 def test_theme_constituents_include_weight_and_rationale(client, db):

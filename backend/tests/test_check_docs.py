@@ -3,6 +3,7 @@
 検査そのものが素通りすると、緑のまま陳腐化が進む。検出できることを固定する。
 """
 
+from scripts import check_docs
 from scripts.check_docs import broken_links, forbidden_terms
 
 
@@ -65,3 +66,39 @@ def test_migration_context_is_allowed(tmp_path):
     )
 
     assert forbidden_terms(path) == []
+
+
+def test_broken_backticked_path_is_detected(tmp_path, monkeypatch):
+    """リンクではないパス記載も検査する。正本の表はこの形式を使う。"""
+    monkeypatch.setattr(check_docs, "REPO_ROOT", tmp_path)
+    (tmp_path / "docs").mkdir()
+    path = _write(tmp_path, "a.md", "正本は `docs/gone/moved.md` にある。")
+
+    assert [c for _line, c in check_docs.broken_backticked_paths(path)] == ["docs/gone/moved.md"]
+
+
+def test_existing_backticked_path_is_not_reported(tmp_path, monkeypatch):
+    """実在するパスは報告しない。"""
+    monkeypatch.setattr(check_docs, "REPO_ROOT", tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "here.md").write_text("x", encoding="utf-8")
+    path = _write(tmp_path, "a.md", "正本は `docs/here.md` にある。")
+
+    assert check_docs.broken_backticked_paths(path) == []
+
+
+def test_non_repository_paths_are_ignored(tmp_path, monkeypatch):
+    """GCSの接頭辞や記法まで拾わない。トップ階層が実在するものだけ検査する。"""
+    monkeypatch.setattr(check_docs, "REPO_ROOT", tmp_path)
+    path = _write(tmp_path, "a.md", "GCSの `raw/` と `postgres-backups/`、記法の `metric_id/value`。")
+
+    assert check_docs.broken_backticked_paths(path) == []
+
+
+def test_intentional_local_config_path_is_not_reported(tmp_path, monkeypatch):
+    """Git管理外の正規なローカル設定パスはCIで存在しなくてもよい。"""
+    monkeypatch.setattr(check_docs, "REPO_ROOT", tmp_path)
+    (tmp_path / "backend").mkdir()
+    path = _write(tmp_path, "a.md", "接続先は `backend/.env` で選ぶ。")
+
+    assert check_docs.broken_backticked_paths(path) == []

@@ -1,6 +1,10 @@
 import os
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,6 +20,11 @@ os.environ["DATABASE_URL"] = os.environ.get(
 from app.database import Connection, connect_database, get_db, get_readiness_db
 from app.main import app
 from db.postgres_migrations import upgrade_database
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from build_financial_parquet import build_schema
+from build_parquet import PRICE_SCHEMA
 
 # Databases this suite is allowed to truncate. Development (`invest`) and production
 # (`neondb`) are excluded on purpose; there is no option to override this.
@@ -81,8 +90,29 @@ def db(migrated_postgres) -> Iterator[Connection]:
         conn.close()
 
 
+@pytest.fixture(scope="session")
+def analytics_lake(tmp_path_factory) -> str:
+    """APIテスト用の空のlakeを1度だけ作り、そのルートを返す。
+
+    価格も財務も読み出し経路は分析層の1本だけなので、分析層が無い状態のアプリは
+    本番でもデモでも存在しない。テストのアプリも同じ形にする。中身に依存する検証は
+    `test_price_source.py` と `test_financial_source.py` が自前のParquetで行う。
+    """
+    lake = tmp_path_factory.mktemp("lake")
+    for subpath, schema in (
+        ("observed/market_price", PRICE_SCHEMA),
+        ("observed/financial_summary", build_schema()),
+    ):
+        partition = lake / subpath / "year=2026"
+        partition.mkdir(parents=True)
+        pq.write_table(
+            pa.Table.from_pylist([], schema=schema), partition / "part-0.parquet"
+        )
+    return str(lake)
+
+
 @pytest.fixture
-def client(db: Connection):
+def client(db: Connection, analytics_lake: str):
     def override_get_db():
         try:
             yield db
@@ -93,8 +123,14 @@ def client(db: Connection):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_readiness_db] = override_get_db
+    # lifespanが分析層へ接続する。所在を渡さないとアプリが起動できない。
+    from app.config import settings
+
+    previous = settings.parquet_lake
+    settings.parquet_lake = analytics_lake
     try:
         with TestClient(app) as test_client:
             yield test_client
     finally:
+        settings.parquet_lake = previous
         app.dependency_overrides.clear()

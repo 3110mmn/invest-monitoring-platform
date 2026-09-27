@@ -13,8 +13,10 @@ backend/.env.neon
 # provision_roles.py が出力する接続URL。環境ごとに増えるためワイルドカードで塞ぐ。
 backend/.env.neon.*
 data/raw/
-data/backups/
-*.sql.gz
+# rawから再生成できる派生物。正本ではないので追跡しない。
+data/parquet/
+# 公開デモ用のsynthetic Parquet。seed_demo.py が生成し、GCSへ公開する派生物。
+data/demo-parquet/
 
 # frontend
 frontend/node_modules/
@@ -27,7 +29,11 @@ frontend/out/
 dist/
 build/
 
-memo/
-.claude/
+# 作業メモ。計画と外部仕様は履歴を追いたいので追跡し、それ以外は追跡しない。
+# 公開スナップショットからは scripts/export_public.py が memo/ ごと除外する。
+memo/*
+!memo/plan/
+!memo/infrastructure/
+!memo/jquants/
 .obsidian/
 gha-creds-*.json

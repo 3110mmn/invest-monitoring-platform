@@ -6,7 +6,6 @@ function disclosure(
   overrides: Partial<FinancialDisclosure> & { disclosure_number: string },
 ): FinancialDisclosure {
   return {
-    disclosure_id: 1,
     target_id: 1,
     source_key: "jquants",
     disclosed_date: "2026-01-01",

@@ -15,7 +15,7 @@
 
 | テーブル | 採用中 | 代替・候補 | 状態 |
 |---|---|---|---|
-| `market_price_observation` | **yfinance** | J-Quants `/equities/bars/daily` | J-Quantsは実装済みだが日次では無効。過去分の取得には使用 |
+| `market_price_observation` | **yfinance**（管理銘柄の直近） | J-Quants `/equities/bars/daily`（全市場、84日前まで） | 期間で分担。[§2](#2-株価の取得元)を参照 |
 | `investment_target` | 手動登録 | J-Quants `/equities/master` | マスタ同期は実装済み（`jquants_sync.py master --missing`） |
 | `investment_target_identifier` | **J-Quants `/equities/master`** | — | `jpx_code` のみ。将来 `edinet_code` を追加 |
 | `financial_disclosure` / `financial_summary` | **J-Quants `/fins/summary`** | EDINET DB API、EDINET API | 実装済み。代替は未着手 |
@@ -27,11 +27,37 @@
 ### 優先順位
 
 1. **J-Quants** — 調整済みOHLCで、`ingestion_run` による来歴が残る
-2. **yfinance** — J-Quantsで取得できない期間・銘柄の代替
+2. **yfinance** — J-Quantsが提供しない直近期間を埋める代替
 
-**ただし現在は yfinance を日次で使用している。** Freeプランが直近84日を提供しないため、
-J-Quants経路へ振り分けると直近価格が取得できなくなる。`JQUANTS_DAILY_ENABLED` は既定で
-無効。
+### 役割分担
+
+Freeプランは直近84日を提供しない。一方この84日は、アプリで表示する銘柄にとっては最も
+見たい期間である。そこで**期間で分担する**。
+
+| 担当 | 取得元 | 対象 | 1日あたりのリクエスト |
+|---|---|---|---|
+| 84日前より過去（全市場） | J-Quants `archive-prices --catch-up` | 全銘柄（約4,700） | 1 |
+| 直近84日 | yfinance `daily_update.py` | 管理銘柄のみ | 銘柄数ぶん |
+
+**この空白は埋まらない。** J-Quantsが提供する最新日は毎日1日ずつ進むが、今日も同じだけ
+進むため、84日の窓は平行移動し続ける。初回に84日分をまとめて埋めた後も、毎日1日ぶんの
+yfinance取得が要る。
+
+代わりに、**yfinanceで埋めた日には84日後にJ-Quantsの公式版が届く**。Derived側が
+J-Quantsを優先するため（`backend/analytics/derived/daily_return.sql`）、暫定値は自動的に
+公式値へ入れ替わる。yfinanceの行は削除しない。一次観測を上書きしないという方針どおり、
+「その時点で何を見て判断したか」も残す。
+
+### yfinanceを全銘柄へ広げない理由
+
+yfinanceは1銘柄1リクエストで、対象は `investment_target` に限る。全銘柄へ広げない。
+
+- 非公式エンドポイントであり、一括取得の許諾がない
+- 全銘柄ぶんを毎日送るとレート制限か遮断に当たる
+- 必要がない。全市場の網羅はJ-Quantsの担当で、直近84日が要るのは表示する銘柄だけ
+
+管理銘柄が増えるとリクエスト数は線形に増える。数十件を超える場合は、`yf.download` の
+複数ティッカー一括取得へ切り替えて1リクエストへまとめる。
 
 ### 比較
 
@@ -111,6 +137,11 @@ yfinanceは可用性で選んでいるのであって、品質で優る訳では
 - 正規化後のWeb Serving FactはPostgreSQLへ保存します。
 - 全市場・長期履歴が必要になった場合も、PostgreSQLへ無条件に集約せず、保存価値を確認して
   GCS Parquetまたは外部APIからの再取得を選択します。
+- **GCS Parquetは分析入力であり、正本ではありません。** rawまたはPostgreSQLから再生成できる
+  状態を保ちます。正本を増やすと、食い違ったときにどれが正しいか判断できなくなるためです。
+- **財務開示と株価は、どちらも蓄積しますが理由が違います。** 財務開示は契約プランの提供期間を
+  過ぎると取得できず、訂正前の値も残らないため、失うと取り返せません。株価は再取得できますが、
+  調整済み価格は分割で遡及して変わるため、`price_basis`と共に保持します。
 - 各取得元の規約URLは`data_source.terms_url`に保持します。
 
 ## 再配布

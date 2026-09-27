@@ -10,8 +10,22 @@
 
 デモDBに保持すべき状態は無いため、実行のたびに全テーブルを作り直す。差分移行は行わない。
 
+出力先は2つに分かれる。**どちらも本番と同じ経路で読まれる。**
+
+- デモPostgreSQL: 戦略・テーマ・監視対象・構成・取込の来歴（Control Plane）
+- デモGCS Parquet: 価格・財務（Data Plane）
+
+PostgreSQL側が残るのは移行漏れではない。公開デモがテーマや監視対象をPostgreSQLから
+読むのは、本番がそうしているからである。デモだけ別の経路にすると、第三者が実際に触る
+環境が本番と違う実装を動かすことになる。
+
+**`--replace` と `--publish` はセットで実行する。** Parquetの各行は `ingestion_run_id` で
+デモPostgreSQLの `ingestion_run` を指しているため、PostgreSQLだけ作り直すとidがずれ、
+来歴の参照が古い行を指す。
+
 使い方:
-    python backend/scripts/seed_demo.py --database-url postgresql://... --replace
+    python backend/scripts/seed_demo.py --database-url postgresql://... --replace \
+        --publish gs://invest-demo-lake/lake
 """
 
 from __future__ import annotations
@@ -22,6 +36,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import sys
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -35,6 +50,10 @@ from db.postgres_migrations import upgrade_database
 
 # 実データと取り違えないよう、取得元も明示的に架空とする。
 DEMO_SOURCE_KEY = "demo"
+
+# デモParquetの公開先。実データのバケットとは別にして、公開APIのサービスアカウントに
+# はこちらだけ読み取りを与える。安全を環境変数の正しさに依存させない。
+DEMO_BUCKET_PREFIX = "gs://invest-demo-lake"
 
 # 投入を許可するデータベース名。**このスクリプトに本番を操作する正当な用途は無い**ため、
 # 一致しない接続先はオプションを問わず拒否する。警告や--forceで守るのではなく、
@@ -51,6 +70,8 @@ TODAY = date(2026, 9, 18)
 REVISION_FISCAL_YEAR = 2026
 PRICE_DAYS = 500
 
+# 価格と財務はもうPostgreSQLへ書かないが、移行前に投入した行を消すため対象に残す。
+# テーブルを削除する時点でここから外す。
 TRUNCATE_ORDER = (
     "financial_summary",
     "financial_disclosure",
@@ -297,14 +318,19 @@ def _insert_masters(connection: Connection, source_id: int) -> dict[str, int]:
     return target_ids
 
 
-def _insert_prices(
-    connection: Connection, source_id: int, run_id: int, target_ids: dict[str, int]
-) -> int:
+def _build_price_rows(run_id: int) -> list[dict[str, Any]]:
+    """syntheticな価格をParquetの行として作る。
+
+    **PostgreSQLへは入れない。** 価格の読み出し経路は分析層の1本だけで、公開デモも
+    同じコードを通す。`market_price_observation` へ書くと、読まれないデータが増える。
+
+    `jpx_code` は空にする。架空企業に日本の証券コードは無い。`preferred_price` の
+    `security_key` が `target_key` へ退避するので、これで銘柄は識別できる。
+    """
     rng = random.Random(RANDOM_SEED)
     days = _business_days(TODAY, PRICE_DAYS)
-    fetched = datetime.combine(TODAY, time(21, 5), tzinfo=UTC)
-    # 1行ずつ送るとマネージドDBへの往復が数千回になり、投入が数分かかる。まとめて送る。
-    rows: list[tuple[Any, ...]] = []
+    built_at = datetime.combine(TODAY, time(21, 5), tzinfo=UTC)
+    rows: list[dict[str, Any]] = []
 
     for company in COMPANIES:
         price = company.base_price
@@ -324,32 +350,23 @@ def _insert_prices(
             volume = rng.uniform(0.8, 1.6) * company.shares * 0.004
 
             rows.append(
-                (
-                    target_ids[company.key],
-                    source_id,
-                    run_id,
-                    day,
-                    round(open_price, 1),
-                    round(high, 1),
-                    round(max(low, 1.0), 1),
-                    round(price, 1),
-                    round(volume),
-                    fetched,
-                )
+                {
+                    "target_key": company.key,
+                    "jpx_code": None,
+                    "source_key": DEMO_SOURCE_KEY,
+                    "obs_date": day,
+                    "open_price": round(open_price, 1),
+                    "high_price": round(high, 1),
+                    "low_price": round(max(low, 1.0), 1),
+                    "close_price": round(price, 1),
+                    "volume": float(round(volume)),
+                    "price_basis": "adjusted",
+                    "ingestion_run_id": run_id,
+                    "built_at": built_at,
+                }
             )
 
-    connection.executemany(
-        """
-        INSERT INTO market_price_observation (
-            target_id, source_id, ingestion_run_id, obs_date,
-            open_price, high_price, low_price, close_price, volume,
-            price_basis, fetched_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'adjusted', ?)
-        """,
-        rows,
-    )
-    return len(rows)
+    return rows
 
 
 def _summary_values(
@@ -425,12 +442,9 @@ def _summary_values(
     return values
 
 
-def _insert_disclosure(
-    connection: Connection,
+def _disclosure_row(
     *,
-    source_id: int,
     run_id: int,
-    target_id: int,
     company: Company,
     number: str,
     disclosed: date,
@@ -440,75 +454,66 @@ def _insert_disclosure(
     period_end: date | None,
     fiscal_year: int,
     values: dict[str, Any],
-) -> None:
-    fetched = datetime.combine(TODAY, time(21, 10), tzinfo=UTC)
-    row = connection.execute(
-        """
-        INSERT INTO financial_disclosure (
-            target_id, source_id, disclosure_number, disclosed_date, disclosed_time,
-            document_type, fiscal_period_type, period_start, period_end,
-            fiscal_year_start, fiscal_year_end, accounting_standard,
-            ingestion_run_id, source_record_hash, fetched_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JP', ?, ?, ?)
-        RETURNING disclosure_id
-        """,
-        (
-            target_id,
-            source_id,
-            number,
-            disclosed,
-            time(15, 0),
-            document_type,
-            period_type,
-            period_start,
-            period_end,
-            date(fiscal_year - 1, 4, 1),
-            _fiscal_year_end(fiscal_year),
-            run_id,
-            _record_hash({"number": number, "target": company.key, **values}),
-            fetched,
+    columns: list[str],
+) -> dict[str, Any]:
+    """開示1件をParquetの行として作る。
+
+    **PostgreSQLへは入れない。** 財務の読み出し経路も分析層の1本だけである。
+    `jpx_code` は空にする。架空企業に日本の証券コードは無い。
+    """
+    row: dict[str, Any] = {
+        "jpx_code": None,
+        "target_key": company.key,
+        "source_key": DEMO_SOURCE_KEY,
+        "disclosure_number": number,
+        "disclosed_date": disclosed,
+        "disclosed_time": "15:00:00",
+        "document_type": document_type,
+        "fiscal_period_type": period_type,
+        "period_start": period_start,
+        "period_end": period_end,
+        "fiscal_year_start": date(fiscal_year - 1, 4, 1),
+        "fiscal_year_end": _fiscal_year_end(fiscal_year),
+        "accounting_standard": "JP",
+        "reporting_scope": "consolidated",
+        "source_record_hash": _record_hash(
+            {"number": number, "target": company.key, **values}
         ),
-    ).fetchone()
-    assert row is not None
-    disclosure_id = int(row["disclosure_id"])
-
-    columns = ["disclosure_id", "reporting_scope", *values.keys()]
-    placeholders = ", ".join(["?"] * len(columns))
-    connection.execute(
-        f"INSERT INTO financial_summary ({', '.join(columns)}) VALUES ({placeholders})",
-        [disclosure_id, "consolidated", *values.values()],
-    )
+        "ingestion_run_id": run_id,
+        "built_at": datetime.combine(TODAY, time(21, 10), tzinfo=UTC),
+    }
+    # 未提供項目はNULLのままにする。ゼロで埋めない。
+    for column in columns:
+        if column not in row:
+            row[column] = values.get(column)
+    return row
 
 
-def _insert_financials(
-    connection: Connection, source_id: int, run_id: int, target_ids: dict[str, int]
-) -> int:
-    count = 0
+def _build_disclosure_rows(run_id: int, columns: list[str]) -> list[dict[str, Any]]:
+    """syntheticな開示をParquetの行として作る。"""
+    rows: list[dict[str, Any]] = []
     for company in COMPANIES:
-        target_id = target_ids[company.key]
         for fiscal_year in (2025, 2026):
             for period, period_start, period_end, disclosed in _quarter_periods(fiscal_year):
                 if disclosed > TODAY:
                     continue
                 scope = "Consolidated"
                 document_type = f"{period}FinancialStatements_{scope}_JP"
-                _insert_disclosure(
-                    connection,
-                    source_id=source_id,
-                    run_id=run_id,
-                    target_id=target_id,
-                    company=company,
-                    number=f"{company.key.split('.')[0]}-{fiscal_year}-{period}",
-                    disclosed=disclosed,
-                    document_type=document_type,
-                    period_type=period,
-                    period_start=period_start,
-                    period_end=period_end,
-                    fiscal_year=fiscal_year,
-                    values=_summary_values(company, period, fiscal_year),
+                rows.append(
+                    _disclosure_row(
+                        run_id=run_id,
+                        company=company,
+                        number=f"{company.key.split('.')[0]}-{fiscal_year}-{period}",
+                        disclosed=disclosed,
+                        document_type=document_type,
+                        period_type=period,
+                        period_start=period_start,
+                        period_end=period_end,
+                        fiscal_year=fiscal_year,
+                        values=_summary_values(company, period, fiscal_year),
+                        columns=columns,
+                    )
                 )
-                count += 1
 
             # 予想を見直した企業は、決算とは別に業績予想の修正を開示する。
             # 実績が空で予想だけ入る行があることを、デモでも再現する。
@@ -517,23 +522,22 @@ def _insert_financials(
                 forecast_only = {
                     k: v for k, v in revised.items() if k.startswith("forecast_")
                 }
-                _insert_disclosure(
-                    connection,
-                    source_id=source_id,
-                    run_id=run_id,
-                    target_id=target_id,
-                    company=company,
-                    number=f"{company.key.split('.')[0]}-{fiscal_year}-REV",
-                    disclosed=date(fiscal_year, 2, 12),
-                    document_type="EarnForecastRevision",
-                    period_type=None,
-                    period_start=None,
-                    period_end=None,
-                    fiscal_year=fiscal_year,
-                    values=forecast_only,
+                rows.append(
+                    _disclosure_row(
+                        run_id=run_id,
+                        company=company,
+                        number=f"{company.key.split('.')[0]}-{fiscal_year}-REV",
+                        disclosed=date(fiscal_year, 2, 12),
+                        document_type="EarnForecastRevision",
+                        period_type=None,
+                        period_start=None,
+                        period_end=None,
+                        fiscal_year=fiscal_year,
+                        values=forecast_only,
+                        columns=columns,
+                    )
                 )
-                count += 1
-    return count
+    return rows
 
 
 def assert_demo_database(connection: Connection) -> str:
@@ -562,6 +566,59 @@ def existing_real_sources(connection: Connection) -> list[str]:
     return [row["source_key"] for row in rows]
 
 
+def write_demo_parquet(
+    rows: list[dict[str, Any]], out_dir: Path, *, subpath: str, schema, date_column: str
+) -> dict[int, int]:
+    """syntheticなデータを、実データと同じスキーマ・同じ配置で書き出す。
+
+    スキーマを実データの書き出しから借りるのは、デモと本番で列がずれないようにするため。
+    読むコードは1本しかないので、片方だけ列が欠けると公開デモだけが壊れる。
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    by_year: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_year.setdefault(row[date_column].year, []).append(row)
+
+    target_root = out_dir / subpath
+    written: dict[int, int] = {}
+    for year, year_rows in sorted(by_year.items()):
+        partition = target_root / f"year={year}"
+        partition.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.Table.from_pylist(year_rows, schema=schema),
+            partition / "part-0.parquet",
+            compression="zstd",
+        )
+        written[year] = len(year_rows)
+    return written
+
+
+def publish_demo_parquet(local_dir: Path, destination: str) -> None:
+    """デモParquetを公開する。**実データのバケットへは書かせない。**
+
+    公開APIのサービスアカウントが読めるのはデモ用バケットだけで、実データの
+    バケットには権限が無い。取り違えを防ぐため、宛先がデモ用でなければ拒否する。
+    """
+    if not destination.startswith(DEMO_BUCKET_PREFIX):
+        raise SystemExit(
+            f"デモParquetの公開先は {DEMO_BUCKET_PREFIX} 配下に限ります: {destination}"
+        )
+    result = subprocess.run(
+        [
+            "gcloud", "storage", "rsync", "--recursive",
+            "--delete-unmatched-destination-objects",
+            str(local_dir / "observed"),
+            f"{destination.rstrip('/')}/observed",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"デモParquetの公開に失敗しました: {result.stderr.strip()[:300]}")
+
+
 def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[str, int]:
     """デモデータを投入する。
 
@@ -583,14 +640,15 @@ def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[
     source_id = _insert_source(connection)
     price_run = _insert_run(connection, source_id, "demo_prices", PRICE_DAYS)
     financial_run = _insert_run(connection, source_id, "demo_financials", 730)
-    target_ids = _insert_masters(connection, source_id)
-    prices = _insert_prices(connection, source_id, price_run, target_ids)
-    disclosures = _insert_financials(connection, source_id, financial_run, target_ids)
+    # 銘柄マスタとテーマ構成はPostgreSQLに残る。監視対象はControl Planeの領分。
+    _insert_masters(connection, source_id)
+    # 価格も財務もPostgreSQLへ入れない。読み出し経路は分析層の1本だけなので、
+    # Parquetへ書く。PostgreSQLに残るのは戦略・テーマ・監視対象・構成だけになる。
     return {
         "themes": len(THEMES),
         "targets": len(COMPANIES),
-        "prices": prices,
-        "disclosures": disclosures,
+        "price_run": price_run,
+        "financial_run": financial_run,
     }
 
 
@@ -615,6 +673,17 @@ def main() -> int:
         action="store_true",
         help="デモ用DBに想定外の取得元があっても続行する。デモ用DB以外は対象にできない",
     )
+    parser.add_argument(
+        "--parquet-out",
+        type=Path,
+        default=Path("data/demo-parquet"),
+        help="syntheticな価格Parquetの出力先",
+    )
+    parser.add_argument(
+        "--publish",
+        metavar="GS_URI",
+        help=f"価格Parquetを公開する（{DEMO_BUCKET_PREFIX}/... のみ）",
+    )
     args = parser.parse_args()
 
     os.environ["DATABASE_URL"] = args.database_url
@@ -638,11 +707,40 @@ def main() -> int:
     finally:
         connection.close()
 
-    print(
-        "デモデータを投入しました: "
-        f"テーマ{counts['themes']}件 / 銘柄{counts['targets']}件 / "
-        f"価格{counts['prices']}件 / 開示{counts['disclosures']}件"
+    # 価格も財務も分析層へ書く。PostgreSQLには入れない。
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from build_financial_parquet import DISCLOSURE_FIELDS, build_schema
+    from build_parquet import PRICE_SCHEMA
+
+    financial_schema = build_schema()
+    metadata = {name for name, _ in DISCLOSURE_FIELDS}
+    value_columns = [n for n in financial_schema.names if n not in metadata]
+
+    prices = write_demo_parquet(
+        _build_price_rows(counts["price_run"]),
+        args.parquet_out,
+        subpath="observed/market_price",
+        schema=PRICE_SCHEMA,
+        date_column="obs_date",
     )
+    disclosures = write_demo_parquet(
+        _build_disclosure_rows(counts["financial_run"], value_columns),
+        args.parquet_out,
+        subpath="observed/financial_summary",
+        schema=financial_schema,
+        date_column="disclosed_date",
+    )
+
+    print(
+        "デモデータを投入しました（PostgreSQL）: "
+        f"テーマ{counts['themes']}件 / 銘柄{counts['targets']}件"
+    )
+    print(f"Parquet → {args.parquet_out}")
+    print(f"  価格: {sum(prices.values()):,}行  {dict(prices)}")
+    print(f"  開示: {sum(disclosures.values()):,}行  {dict(disclosures)}")
+    if args.publish:
+        publish_demo_parquet(args.parquet_out, args.publish)
+        print(f"公開先: {args.publish}")
     return 0
 
 

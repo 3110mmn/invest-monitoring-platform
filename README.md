@@ -15,17 +15,6 @@
 > 公開環境には実データを置かず、synthetic dataを別環境に用意しています。実データを扱う環境は
 > 非公開で、データ・認証情報・DBを公開側と共有しません。
 
-### このリポジトリの位置付け
-
-本リポジトリは、実データを扱う非公開の開発・運用リポジトリから、公開可能なコードとドキュメントだけを
-切り出した**ポートフォリオ用スナップショット**です。実データ環境の日次ETL、デプロイ、バックアップ、
-Secretおよび運用履歴は、データ利用条件とセキュリティ上の理由から非公開で管理しています。
-
-そのため、本リポジトリは非公開リポジトリの完全なミラーでも、本番運用の起点でもありません。公開側の
-Git履歴はスナップショット公開以降のみを保持し、公開可能なマイルストーン単位で更新します。収録した
-コードはCIでテスト・型検査・lint・Docker buildを再検証でき、公開デモは本番データと分離した架空データで
-動作します。
-
 ## ポイント
 
 | 観点 | 実装内容 |
@@ -36,7 +25,7 @@ Git履歴はスナップショット公開以降のみを保持し、公開可�
 | Web | Next.jsでテーマ、構成銘柄、株価、財務実績・会社予想・開示履歴を表示 |
 | Cloud | Cloud Run、Neon PostgreSQL、GCS、Artifact Registry、Secret Manager、IAMを利用 |
 | 運用 | GitHub ActionsによるCI/CD・日次ETL・バックアップ、readiness、復元検証 |
-| 品質 | PostgreSQLを使うバックエンドテスト150件、フロントエンドテスト13件、型・lint・build検証 |
+| 品質 | PostgreSQLを使うバックエンドテスト262件、フロントエンドテスト13件、型・lint・build検証 |
 
 ---
 
@@ -102,17 +91,29 @@ AI-readyとは、単にデータをAIへ渡せることではなく、データ�
 ```mermaid
 flowchart LR
     Sources["J-Quants / yfinance"] --> Actions["GitHub Actions<br/>日次ETL"]
-    Actions --> DB[("PostgreSQL<br/>実データの正本<br/>非公開")]
-    Actions --> GCS[("GCS<br/>backup / raw")]
-    Admin["管理者"] --> AdminAPI["Cloud Run admin-api<br/>read-write / IAM"] --> DB
-    Seed["seed_demo.py<br/>synthetic生成"] --> DemoDB[("PostgreSQL<br/>デモ専用<br/>別プロジェクト")]
-    Public["公開Frontend"] --> PublicAPI["Cloud Run public-api<br/>read-only"] --> DemoDB
-    LocalWeb["Local Frontend"] --> LocalAPI["Local FastAPI"] --> LocalDB[("Docker PostgreSQL<br/>開発DB")]
+    Actions --> Raw[("GCS raw/<br/>原本・非公開")]
+    Raw --> Lake[("GCS lake/<br/>Parquet・非公開")]
+    Actions --> DB[("PostgreSQL<br/>監視対象・テーマ<br/>非公開")]
+    Admin["管理者"] --> AdminAPI["Cloud Run admin-api<br/>read-write / IAM"]
+    AdminAPI --> DB
+    AdminAPI -->|"DuckDB"| Lake
+    Seed["seed_demo.py<br/>synthetic生成"] --> DemoDB[("PostgreSQL<br/>デモ専用")]
+    Seed --> DemoLake[("GCS<br/>デモ専用バケット")]
+    Public["公開Frontend"] --> PublicAPI["Cloud Run public-api<br/>read-only"]
+    PublicAPI --> DemoDB
+    PublicAPI -->|"DuckDB"| DemoLake
 ```
 
-公開APIと管理APIは**同じイメージ**を使い、Cloud Runサービス・DBロール・環境変数で権限を分けます。公開側は `DATABASE_READ_ONLY=true` とDB側の読み取り専用ロールを併用し、書き込み系はHTTPの入口で拒否します。
+**rawが原本で、ParquetもPostgreSQLも派生です。** PostgreSQLは「何を監視しているか」を持ち、
+Parquetは「その値がいくらだったか」を持ちます。価格と財務はParquetからしか読みません。
 
-**公開APIの接続先は実データの正本ではなく、架空データだけを持つ別DBです。** 両者はスキーマとAPI契約を共有しますが、データ・認証情報・DBのプロジェクトを共有しません。GCSは正本ではなく、`pg_dump` バックアップとrawの保管先です。
+公開APIと管理APIは**同じイメージ・同じコード**を使い、Cloud Runサービス・DBロール・環境変数・
+IAMで権限を分けます。公開側は `DATABASE_READ_ONLY=true` とDB側の読み取り専用ロールを併用し、
+書き込み系はHTTPの入口で拒否します。
+
+**公開APIは実データへ物理的に到達できません。** 接続先のDBは架空データ専用で、GCSも別バケットです。
+公開APIのサービスアカウントには実データのバケットへの権限を与えていないため、環境変数を
+取り違えても実データは読めません。
 
 ### アプリケーション層（API）
 
@@ -125,15 +126,16 @@ FastAPIがテーマ、投資対象、価格、財務、取込実行履歴を提�
 | 層 | 内容 | 状態 |
 |---|---|---|
 | Master | 何を観測・分類・投資するか | 実装済み |
-| Observed | 外部から取得し正規化した一次観測（価格・財務開示） | 実装済み |
-| Derived | Observedから再計算できる特徴量・リターン・リスク指標 | 未着手 |
+| Observed | 外部から取得し正規化した一次観測（価格・財務開示） | 実装済み（GCS Parquet、全4,732銘柄・2年分） |
+| Derived | Observedから再計算できる特徴量・リターン・リスク指標 | 着手（日次リターン。計算定義が正本で結果は保存しない） |
 | Assessment | 閾値・モデルによるバージョン付きの評価 | 未着手 |
 | Decision | 評価を踏まえた意思決定 | 未着手 |
 | Outcome | 約定・保有・損益という事実 | 未着手 |
 
 ### データフロー概要
 
-外部API、ETL、PostgreSQL、API、Webを分離し、取得元から画面表示まで追跡できる構成にしています。
+外部API、ETL、分析層（Parquet / DuckDB）、Control Plane（PostgreSQL）、API、Webを分離し、
+取得元から画面表示まで追跡できる構成にしています。
 
 ### DB設計概要
 
@@ -151,6 +153,7 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 | バックエンド | Python 3.11 / FastAPI / psycopg |
 | DB | PostgreSQL 17 / Alembic |
 | フロントエンド | Next.js 16 / TypeScript / Tailwind CSS |
+| 分析層 | GCS Parquet / DuckDB / pyarrow |
 | データ取得 | J-Quants API / yfinance |
 | インフラ | Cloud Run / Cloud Storage / Artifact Registry / Secret Manager / IAM / Neon |
 | CI/CD | GitHub Actions（lint・型・テスト・Dockerビルド / deploy / 日次ETL / backup） |
@@ -160,16 +163,17 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 一般的な規約ではなく、**このプロジェクト固有の判断**を残しています。
 
 - **既存ツールと競合する機能は作らない** — 高機能チャートや全銘柄スクリーナーは既存サービスを利用し、本プロジェクトではデータの統合・来歴管理・投資仮説との関連付け・事後検証に集中する
-- **データの利用条件を環境分離で担保する** — 市場データの再配布を避けるため、公開デモは架空データ専用のDBを別プロジェクトに置く。公開環境に実データが物理的に存在しない状態にし、運用の注意ではなく構成で守る
+- **データの利用条件を環境分離で担保する** — 市場データの再配布を避けるため、公開デモは架空データ専用のDBとGCSバケットを別に置く。公開APIのサービスアカウントに実データのバケットへの権限を与えないので、設定を取り違えても実データは読めない。運用の注意ではなく構成で守る
 - **評価・判断を観測Factに混ぜない** — 閾値や判定結果をFactテーブルに持たせると、ルールを変えるたびにFactを作り直すことになる
 - **SQLアクセスを集約する** — Routerはドメインモデルを扱い、SQLはRepositoryまたはデータ更新処理へ集約する
-- **全市場データをServing DBへ集約しない** — PostgreSQLは監視・Web表示に必要な範囲へ限定し、将来の全市場履歴はGCS / Parquetで扱う
+- **価格・財務とアプリ状態を分離する** — 価格・財務はGCS / Parquetに集約し、DuckDB経由でFastAPIへ提供する。PostgreSQLは「何を監視しているか」（戦略・テーマ・監視対象・構成）だけを持つ。**読み出し経路は1本**で、公開デモも同じコードを通る
+- **一次観測の採用規則を1か所に置く** — 同じ日に複数の取得元がある場合にどちらを採るかは `preferred_price` という単一の定義に寄せる。APIとDerivedが別々に優先順位を持つと、画面の終値と計算されたリターンが食い違う
 - **欠損をゼロで埋めない** — 未提供・非開示・対象外はすべて `NULL`。IFRSに経常利益が無いことと、値がゼロであることを区別する
 - **推測で実装しない** — 外部APIの項目名や制限は実レスポンスで確認してから書く。資料の記載と実際が食い違った例が複数ある
 
 ### データ品質・トレーサビリティ
 
-- **一次観測を上書きしない** — 取得元が違う同じ日付は別行として保持する（`(target_id, source_id, obs_date)`）
+- **一次観測を上書きしない** — 取得元が違う同じ日付は別行として保持する。どちらを採るかは読み出し側の規則で決め、一次観測そのものは消さない
 - **訂正開示を残す** — 決算の訂正は開示番号が違えば別レコードとし、元の開示を書き換えない
 - **来歴を辿れる** — 取得元、取込実行、取得時点、原レコードのハッシュを記録し、DB値からrawまで遡れる
 - **価格の意味を混在させない** — `price_basis`を必須にし、調整済み、未調整、由来不明を区別する
@@ -180,7 +184,7 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 
 | | |
 |---|---|
-| テスト | バックエンド150件（実PostgreSQLに対して実行） / フロントエンド13件 |
+| テスト | バックエンド262件（実PostgreSQLに対して実行） / フロントエンド13件 |
 | CI | PRとmainへのpushで lint・型・テスト・Dockerビルドを実行 |
 | ドキュメント整合 | スキーマとデータ定義書の乖離を**CIで検出**。更新漏れはテストが落ちる |
 | バックアップ | イミュータブルバックアップを日次取得し、**復元を実際に検証** |

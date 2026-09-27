@@ -46,6 +46,18 @@ ALLOWED_CONTEXT = (
 
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 
+# バッククォートで囲まれた、リポジトリ内のパスらしき文字列。
+# `.claude/CLAUDE.md` の「正本はどこにあるか」の表はリンクではなくこの形式のため、
+# docs再編でパスが動いてもリンク検査では捕まらず、7件が壊れたまま残っていた。
+BACKTICKED_PATH = re.compile(r"`((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]*)`")
+
+# プレースホルダ記法は実在しなくてよい。
+PATH_CHECK_EXCEPTIONS = ("<", "http")
+
+# Git管理外だが、利用者がローカルに作成する正規の設定パス。
+# CIで実体が無いのは意図どおりなので、移動・削除漏れとして扱わない。
+INTENTIONAL_LOCAL_PATHS = {"backend/.env", "backend/.env.neon"}
+
 
 def target_files() -> list[Path]:
     """検査対象のMarkdownを返す。"""
@@ -70,6 +82,31 @@ def broken_links(path: Path) -> list[str]:
     return problems
 
 
+def broken_backticked_paths(path: Path) -> list[tuple[int, str]]:
+    """バッククォート内のリポジトリパスのうち、実在しないものを返す。
+
+    リンク形式でない参照はリンク検査を素通りする。正本の所在を表で示す文書は
+    この形式を使うため、ここを見ないと移動に気づけない。
+    """
+    # リポジトリのトップ階層で始まるものだけを対象にする。そうしないとGCSの
+    # バケット接頭辞（`raw/`）や `metric_id/value` のような記法まで拾ってしまう。
+    top_level = {entry.name for entry in REPO_ROOT.iterdir()}
+
+    problems = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        for candidate in BACKTICKED_PATH.findall(line):
+            if any(token in candidate for token in PATH_CHECK_EXCEPTIONS):
+                continue
+            if candidate in INTENTIONAL_LOCAL_PATHS:
+                continue
+            if candidate.split("/", 1)[0] not in top_level:
+                continue
+            if (REPO_ROOT / candidate).exists():
+                continue
+            problems.append((number, candidate))
+    return problems
+
+
 def forbidden_terms(path: Path) -> list[tuple[int, str, str]]:
     """実装と矛盾する語を、行番号つきで返す。"""
     problems = []
@@ -84,24 +121,31 @@ def forbidden_terms(path: Path) -> list[tuple[int, str, str]]:
 
 def main() -> int:
     link_problems: list[str] = []
+    path_problems: list[str] = []
     term_problems: list[str] = []
 
     for path in target_files():
         shown = path.relative_to(REPO_ROOT)
         for target in broken_links(path):
             link_problems.append(f"  {shown} → {target}")
+        for number, candidate in broken_backticked_paths(path):
+            path_problems.append(f"  {shown}:{number} `{candidate}`")
         for number, term, reason in forbidden_terms(path):
             term_problems.append(f"  {shown}:{number} 「{term}」— {reason}")
 
     if link_problems:
         print("リンク切れ:")
         print("\n".join(link_problems))
+    if path_problems:
+        print("実在しないパスの記載:")
+        print("\n".join(path_problems))
+        print("\n  移動・削除されたファイルを指しています。現行のパスへ直してください")
     if term_problems:
         print("実装と矛盾する語:")
         print("\n".join(term_problems))
         print("\n  経緯として言及する必要がある場合は check_docs.py の ALLOWED_CONTEXT へ追加する")
 
-    if link_problems or term_problems:
+    if link_problems or path_problems or term_problems:
         return 1
     print(f"ドキュメント {len(target_files())} 件を検査。問題ありません")
     return 0

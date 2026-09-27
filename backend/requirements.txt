@@ -9,3 +9,8 @@ yfinance>=0.2.38
 pandas>=2.0.0
 pandas-datareader>=0.10.0
 numpy<2.0.0
+# 分析層（Parquet）の読み出し。DuckDBはParquetをネイティブに読むのでpyarrowは要らない。
+# GCSはfsspec経由でADCを解決する（DuckDB本体のhttpfsはHMACキーを要求するため）。
+duckdb>=1.1,<2
+gcsfs>=2024.6
+certifi>=2024.2

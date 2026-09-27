@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import EnvironmentBanner from "@/components/EnvironmentBanner";
 import { PUBLIC_READ_ONLY } from "@/lib/runtime";
 import "./globals.css";
 
@@ -26,6 +27,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </Link>
           ))}
         </nav>
+        {/* 公開環境では接続先が自明なので出さない。取り違えが起きるのはローカルだけ。 */}
+        {!PUBLIC_READ_ONLY && <EnvironmentBanner />}
         {PUBLIC_READ_ONLY && (
           <div className="border-b border-blue-100 bg-blue-50 px-6 py-2 text-center text-xs text-blue-800">
             公開デモ — 表示データはすべて架空です。閲覧のみ可能です

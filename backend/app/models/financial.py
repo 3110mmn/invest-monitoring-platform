@@ -1,6 +1,6 @@
 """Pydantic スキーマ — financial_disclosure / financial_summary"""
 
-from datetime import date, datetime, time
+from datetime import date, time
 
 from pydantic import BaseModel
 
@@ -45,7 +45,8 @@ class FinancialSummaryValues(BaseModel):
 class FinancialDisclosureRead(FinancialSummaryValues):
     """1開示とその財務値。"""
 
-    disclosure_id: int
+    # `disclosure_id` は持たない。PostgreSQLのsurrogate keyで、分析層には無い。
+    # 開示の同一性は `disclosure_number` が表す。
     target_id: int
     source_key: str
     disclosure_number: str
@@ -59,7 +60,6 @@ class FinancialDisclosureRead(FinancialSummaryValues):
     fiscal_year_end: date | None = None
     accounting_standard: str | None = None
     ingestion_run_id: int | None = None
-    fetched_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -82,3 +82,11 @@ class LatestFinancialRead(BaseModel):
     current_forecast: FinancialDisclosureRead | None = None
     next_forecast: FinancialDisclosureRead | None = None
     dividend_forecast: FinancialDisclosureRead | None = None
+
+
+class FinancialOverviewRead(BaseModel):
+    """銘柄詳細画面で使う財務データ一式。Parquetは1回だけ走査する。"""
+
+    latest: LatestFinancialRead | None = None
+    disclosures: list[FinancialDisclosureRead]
+    forecast_history: list[FinancialDisclosureRead]

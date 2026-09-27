@@ -15,6 +15,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --requirement requirements.txt
 
 COPY --chown=appuser:appgroup backend/app ./app
+COPY --chown=appuser:appgroup backend/analytics ./analytics
 COPY --chown=appuser:appgroup backend/db ./db
 COPY --chown=appuser:appgroup backend/migrations ./migrations
 COPY --chown=appuser:appgroup backend/alembic.ini ./alembic.ini

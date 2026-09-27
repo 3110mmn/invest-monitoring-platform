@@ -141,11 +141,25 @@ class JQuantsClient:
     def daily_prices(
         self,
         *,
-        code: str,
+        code: str | None = None,
+        date: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
     ) -> list[dict[str, Any]]:
-        params = {"code": code}
+        """日次四本値を取得する。`code`と`date`は排他で、どちらか必須。
+
+        `date`を指定すると**その日の全銘柄**が1リクエストで返る。銘柄単位で回すと
+        リクエスト数が銘柄数に比例するが、日付単位なら日数にしか比例しない。
+        全市場を対象にするときは`date`を使う。
+        """
+        if code is not None and date is not None:
+            raise ValueError("daily_prices の code と date は同時に指定できません")
+        if code is not None:
+            params: dict[str, str] = {"code": code}
+        elif date is not None:
+            params = {"date": date}
+        else:
+            raise ValueError("daily_prices は code と date のどちらかが必要です")
         if date_from:
             params["from"] = date_from
         if date_to:

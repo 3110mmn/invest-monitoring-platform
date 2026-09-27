@@ -4,6 +4,7 @@
  */
 import type {
   FinancialDisclosure,
+  FinancialOverview,
   InvestmentTarget,
   LatestFinancial,
   MarketPrice,
@@ -102,6 +103,9 @@ export const getForecastHistory = (id: number, limit = 50) =>
 
 export const getLatestFinancial = (id: number) =>
   request<LatestFinancial>(`/investment-targets/${id}/financial-summary/latest`);
+
+export const getFinancialOverview = (id: number, limit = 50) =>
+  request<FinancialOverview>(`/investment-targets/${id}/financial-overview?limit=${limit}`);
 
 export const createInvestmentTarget = (data: Partial<InvestmentTarget>) =>
   request<InvestmentTarget>("/investment-targets/", { method: "POST", body: JSON.stringify(data) });

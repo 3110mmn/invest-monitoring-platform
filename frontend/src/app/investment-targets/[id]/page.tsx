@@ -5,11 +5,8 @@ import { use } from "react";
 import Link from "next/link";
 import PriceChart from "@/components/charts/PriceChart";
 import {
-  getFinancialDisclosures,
-  ApiError,
-  getForecastHistory,
+  getFinancialOverview,
   getInvestmentTarget,
-  getLatestFinancial,
   getMarketPrices,
 } from "@/lib/api";
 import { withForecastChanges } from "@/lib/forecast";
@@ -104,25 +101,14 @@ export default function InvestmentTargetDetailPage({
 
   useEffect(() => {
     getInvestmentTarget(targetId).then(setTarget).catch((e) => setError(e.message));
-    // 財務は開示が無い銘柄（ETF・指数等）で404になる。これは正常なので画面を壊さない。
-    // 一方で障害やネットワーク断を「開示なし」と表示すると、故障がデータ不足に偽装される。
-    // 404だけを「データなし」として扱い、それ以外はエラーとして見せる。
-    const asMissingData = (setEmpty: () => void) => (e: unknown) => {
-      if (e instanceof ApiError && e.status === 404) {
-        setEmpty();
-        return;
-      }
-      setError(e instanceof Error ? e.message : String(e));
-    };
-    getLatestFinancial(targetId)
-      .then(setLatest)
-      .catch(asMissingData(() => setLatest(null)));
-    getFinancialDisclosures(targetId)
-      .then(setDisclosures)
-      .catch(asMissingData(() => setDisclosures([])));
-    getForecastHistory(targetId)
-      .then(setForecasts)
-      .catch(asMissingData(() => setForecasts([])));
+    // 最新値・開示履歴・予想履歴をまとめて取得し、GCS上のParquet走査を1回にする。
+    getFinancialOverview(targetId)
+      .then((overview) => {
+        setLatest(overview.latest);
+        setDisclosures(overview.disclosures);
+        setForecasts(overview.forecast_history);
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [targetId]);
 
   useEffect(() => {
@@ -252,7 +238,7 @@ export default function InvestmentTargetDetailPage({
               </thead>
               <tbody>
                 {withForecastChanges(forecasts).map(({ disclosure, changes }) => (
-                  <tr key={disclosure.disclosure_id} className="border-t hover:bg-gray-50">
+                  <tr key={disclosure.disclosure_number} className="border-t hover:bg-gray-50">
                     <td className="px-3 py-2 whitespace-nowrap">{disclosure.disclosed_date}</td>
                     <td className="px-3 py-2">{disclosure.fiscal_period_type ?? "—"}</td>
                     <td className="px-3 py-2 text-right font-mono">
@@ -297,7 +283,7 @@ export default function InvestmentTargetDetailPage({
               </thead>
               <tbody>
                 {disclosures.map((d) => (
-                  <tr key={d.disclosure_id} className="border-t hover:bg-gray-50">
+                  <tr key={d.disclosure_number} className="border-t hover:bg-gray-50">
                     <td className="px-3 py-2">{d.disclosed_date}</td>
                     <td className="px-3 py-2">{d.fiscal_period_type ?? "—"}</td>
                     <td className="px-3 py-2">{d.accounting_standard ?? "—"}</td>

@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from app.etl.plan_window import PlanWindow
+from app.etl.plan_window import PlanWindow, business_days, catch_up_range
 
 FREE = PlanWindow(lag_days=84, history_years=2)
 TODAY = date(2026, 9, 12)
@@ -44,3 +44,36 @@ def test_paid_plan_without_lag_reaches_today():
     """遅延なしのプランでは当日まで取得できる。"""
     paid = PlanWindow(lag_days=0, history_years=18)
     assert paid.clamp(date(2026, 9, 1), TODAY, today=TODAY) == (date(2026, 9, 1), TODAY)
+
+
+def test_catch_up_resumes_from_the_day_after_the_last_archive():
+    """前回の続きから取得する。日次が失敗した日を穴として残さないため。"""
+    pending = catch_up_range(date(2026, 7, 1), date(2026, 7, 5))
+
+    assert pending == (date(2026, 7, 2), date(2026, 7, 5))
+
+
+def test_catch_up_returns_nothing_when_already_current():
+    """最新まで取得済みなら何もしない。"""
+    assert catch_up_range(date(2026, 7, 5), date(2026, 7, 5)) is None
+
+
+def test_catch_up_without_history_takes_only_the_newest_day():
+    """履歴が無いときに窓全体を取りにいかない。バックフィルは別コマンドの役割。"""
+    pending = catch_up_range(None, date(2026, 7, 5))
+
+    assert pending == (date(2026, 7, 5), date(2026, 7, 5))
+
+
+def test_business_days_skip_weekends():
+    """土日は市場が開かないと確定しているので投げない。"""
+    days = business_days(date(2026, 7, 3), date(2026, 7, 6))  # 金土日月
+
+    assert days == ["2026-07-03", "2026-07-06"]
+
+
+def test_business_days_respect_the_limit():
+    """一度に取りすぎない。CIで想定外に長時間走らせないため。"""
+    days = business_days(date(2026, 7, 1), date(2026, 7, 31), limit=3)
+
+    assert len(days) == 3

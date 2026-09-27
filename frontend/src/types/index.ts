@@ -70,7 +70,6 @@ export interface Strategy {
 }
 
 export interface MarketPrice {
-  log_id: number;
   target_id: number;
   source_key: string;
   obs_date: string;
@@ -80,7 +79,6 @@ export interface MarketPrice {
   close_price: number | null;
   volume: number | null;
   price_basis: string;
-  fetched_at: string;
 }
 
 /**
@@ -88,7 +86,8 @@ export interface MarketPrice {
  * 値が入る列は開示種別で入れ替わる（FY開示は今期予想を持たず翌期予想を持つ）。
  */
 export interface FinancialDisclosure {
-  disclosure_id: number;
+  // disclosure_id は持たない。PostgreSQL の surrogate key で、分析層には無い。
+  // 開示の同一性は disclosure_number が表す。
   target_id: number;
   source_key: string;
   disclosure_number: string;
@@ -130,4 +129,10 @@ export interface LatestFinancial {
   current_forecast: FinancialDisclosure | null;
   next_forecast: FinancialDisclosure | null;
   dividend_forecast: FinancialDisclosure | null;
+}
+
+export interface FinancialOverview {
+  latest: LatestFinancial | null;
+  disclosures: FinancialDisclosure[];
+  forecast_history: FinancialDisclosure[];
 }

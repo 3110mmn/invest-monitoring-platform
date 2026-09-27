@@ -1,7 +1,7 @@
 """
 InvestmentTargetRepository — アセット + theme_investment_target の CRUD
 """
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from app.repositories.base import BaseRepository
@@ -31,56 +31,9 @@ class InvestmentTargetRepository(BaseRepository):
             ORDER BY ta.basket_weight DESC, a.target_name
         """, (theme_id,))
 
-    def get_price_history(self, target_id: int, days: int = 30) -> list[dict[str, Any]]:
-        cutoff = (date.today() - timedelta(days=days)).isoformat()
-        return self.execute_query("""
-            WITH ranked AS (
-                SELECT l.*, ds.source_key,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY l.target_id, l.obs_date
-                           ORDER BY l.fetched_at DESC, l.source_id DESC
-                       ) AS source_rank
-                FROM market_price_observation l
-                JOIN data_source ds ON ds.source_id = l.source_id
-                WHERE l.target_id = ? AND l.obs_date >= ?
-            )
-            SELECT log_id, target_id, source_key, ingestion_run_id, obs_date,
-                   open_price, high_price, low_price, close_price, volume,
-                   price_basis, fetched_at, note, created_at
-            FROM ranked
-            WHERE source_rank = 1
-            ORDER BY obs_date ASC
-        """, (target_id, cutoff))
-
-    def get_latest_price(self, target_id: int) -> dict[str, Any] | None:
-        return self.execute_single("""
-            SELECT l.*, ds.source_key
-            FROM market_price_observation l
-            JOIN data_source ds ON ds.source_id = l.source_id
-            WHERE l.target_id = ?
-            ORDER BY l.obs_date DESC, l.fetched_at DESC, l.source_id DESC
-            LIMIT 1
-        """, (target_id,))
-
-    def get_all_latest_prices(self) -> list[dict[str, Any]]:
-        return self.execute_query("""
-            WITH ranked AS (
-                SELECT l.*, ds.source_key,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY l.target_id
-                           ORDER BY l.obs_date DESC, l.fetched_at DESC, l.source_id DESC
-                       ) AS price_rank
-                FROM market_price_observation l
-                JOIN data_source ds ON ds.source_id = l.source_id
-            )
-            SELECT a.target_id, a.target_key, a.target_name, a.target_type,
-                   l.obs_date AS latest_date, l.close_price, l.source_key,
-                   l.ingestion_run_id, l.price_basis, l.fetched_at
-            FROM investment_target a
-            JOIN ranked l ON a.target_id = l.target_id AND l.price_rank = 1
-            WHERE a.is_active = TRUE
-            ORDER BY a.target_name
-        """)
+    # 価格の読み出しは `repositories/price_source.py` が持つ。所在がPostgreSQLとは
+    # 限らず（分析層のParquetを読む配備がある）、この Repository は監視対象の管理に
+    # 専念する。
 
     # ---- InvestmentTarget Write ----
 

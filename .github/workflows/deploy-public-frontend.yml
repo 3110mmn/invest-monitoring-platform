@@ -17,12 +17,12 @@ permissions:
   contents: read
 
 env:
-  GCP_PROJECT_ID: "${{ vars.GCP_PROJECT_ID }}"
-  GCP_PROJECT_NUMBER: "${{ vars.GCP_PROJECT_NUMBER }}"
-  ARTIFACT_REPOSITORY: "${{ vars.ARTIFACT_REPOSITORY }}"
-  FRONTEND_SERVICE: "${{ vars.PUBLIC_FRONTEND_SERVICE }}"
-  BACKEND_SERVICE: "${{ vars.PUBLIC_API_SERVICE }}"
-  RUNTIME_SERVICE_ACCOUNT: "${{ vars.FRONTEND_RUNTIME_SERVICE_ACCOUNT }}"
+  GCP_PROJECT_ID: invest-dwh
+  GCP_PROJECT_NUMBER: "540015602390"
+  ARTIFACT_REPOSITORY: invest-monitoring
+  FRONTEND_SERVICE: invest-monitoring-frontend
+  BACKEND_SERVICE: invest-monitoring-public-api
+  RUNTIME_SERVICE_ACCOUNT: invest-frontend-runtime@invest-dwh.iam.gserviceaccount.com
 
 jobs:
   deploy:

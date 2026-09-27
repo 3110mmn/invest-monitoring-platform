@@ -17,12 +17,14 @@ permissions:
   contents: read
 
 env:
-  GCP_PROJECT_ID: "${{ vars.GCP_PROJECT_ID }}"
-  ARTIFACT_REPOSITORY: "${{ vars.ARTIFACT_REPOSITORY }}"
-  CLOUD_RUN_SERVICE: "${{ vars.ADMIN_API_SERVICE }}"
-  DATABASE_SECRET: "${{ vars.ADMIN_DATABASE_SECRET }}"
-  MANAGEMENT_KEY_SECRET: "${{ vars.MANAGEMENT_KEY_SECRET }}"
-  RUNTIME_SERVICE_ACCOUNT: "${{ vars.ADMIN_RUNTIME_SERVICE_ACCOUNT }}"
+  GCP_PROJECT_ID: invest-dwh
+  ARTIFACT_REPOSITORY: invest-monitoring
+  CLOUD_RUN_SERVICE: invest-monitoring-admin-api
+  DATABASE_SECRET: invest-database-writer-url
+  MANAGEMENT_KEY_SECRET: invest-management-api-key
+  RUNTIME_SERVICE_ACCOUNT: invest-admin-runtime@invest-dwh.iam.gserviceaccount.com
+  # 価格と財務は分析層からしか読まない。管理APIは実データのParquetを読む。
+  REAL_PARQUET_LAKE: "gs://invest-dwh-db-storage/lake"
 
 jobs:
   deploy:
@@ -78,7 +80,7 @@ jobs:
             --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
             --port 8080 \
             --no-allow-unauthenticated \
-            --set-env-vars DATABASE_READ_ONLY=false,MANAGEMENT_API_ENABLED=true \
+            --set-env-vars "DATABASE_READ_ONLY=false,MANAGEMENT_API_ENABLED=true,PARQUET_LAKE=${REAL_PARQUET_LAKE}" \
             --set-secrets "DATABASE_URL=${DATABASE_SECRET}:latest,MANAGEMENT_API_KEY=${MANAGEMENT_KEY_SECRET}:latest" \
             --min-instances 0 \
             --max-instances 1 \

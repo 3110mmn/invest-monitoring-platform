@@ -1,0 +1,4 @@
+# Parquetを**構築**するための依存。読み出しには要らない。
+# 読み出し側（duckdb / gcsfs）は backend/requirements.txt にあり、APIコンテナへ入る。
+# pyarrowは110MBあるので、書き出しを行わないコンテナには入れない。
+pyarrow>=18,<21

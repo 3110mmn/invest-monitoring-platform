@@ -37,7 +37,8 @@ class InvestmentTargetRead(InvestmentTargetBase):
 
 
 class MarketPriceRead(BaseModel):
-    log_id: int
+    # log_id / fetched_at / note / created_at は持たない。分析層のParquetには無く、
+    # フロントも参照していない。読み出し元によって形が変わらないようにする。
     target_id: int
     source_key: str
     ingestion_run_id: int | None = None
@@ -48,9 +49,6 @@ class MarketPriceRead(BaseModel):
     close_price: float | None = None
     volume: float | None = None
     price_basis: str
-    fetched_at: datetime
-    note: str | None = None
-    created_at: datetime
 
 
 class LatestMarketPriceRead(BaseModel):
@@ -63,4 +61,3 @@ class LatestMarketPriceRead(BaseModel):
     source_key: str
     ingestion_run_id: int | None = None
     price_basis: str
-    fetched_at: datetime

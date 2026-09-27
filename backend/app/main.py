@@ -1,21 +1,39 @@
 """
 FastAPI エントリーポイント
 """
+from contextlib import asynccontextmanager
+
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.analytics_connection import (
+    close_analytics_connection,
+    get_analytics_connection,
+    open_analytics_connection,
+)
 from app.config import settings
 from app.database import Connection, get_readiness_db
 from app.errors import error_body, register_error_handlers
 from app.routers.domain import financials, investment_targets, relationships, themes
 from app.security import SAFE_METHODS, management_key_from_request, verify_management_key
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        open_analytics_connection()
+        yield
+    finally:
+        close_analytics_connection()
+
+
 app = FastAPI(
     title="投資判断プラットフォーム API",
     description="投資テーマ管理・指標モニタリング・トリガー判定・ポートフォリオ管理",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 register_error_handlers(app)
@@ -88,7 +106,11 @@ def readiness(db: Connection = Depends(get_readiness_db)):
     except psycopg.Error:
         return JSONResponse(
             status_code=503,
-            content={"status": "not_ready", "database": "unavailable"},
+            content={
+                "status": "not_ready",
+                "database": "unavailable",
+                "database_environment": settings.database_environment,
+            },
         )
 
     latest_ingestions = [dict(row) for row in rows]
@@ -96,8 +118,17 @@ def readiness(db: Connection = Depends(get_readiness_db)):
         ingestion["status"] in {"failed", "partial"}
         for ingestion in latest_ingestions
     )
+    # 価格は分析層からしか読まないので、ここが落ちていると価格が一切出ない。
+    # PostgreSQLが健全でも ready とは言えない。
+    analytics = "ok" if get_analytics_connection() is not None else "unavailable"
+    if analytics != "ok":
+        degraded = True
     return {
         "status": "degraded" if degraded else "ready",
         "database": "ok",
+        "analytics": analytics,
+        # 接続先の分類。接続文字列は返さない。ローカルで開発DBと実データDBの
+        # 区別が画面から付かないと、実データを開発だと思って編集する事故が起きる。
+        "database_environment": settings.database_environment,
         "latest_ingestions": latest_ingestions,
     }

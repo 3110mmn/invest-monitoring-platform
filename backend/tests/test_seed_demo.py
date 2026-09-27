@@ -58,8 +58,7 @@ def test_seed_proceeds_on_empty_demo_database(demo_db):
     counts = seed_demo.seed(demo_db, replace=True)
 
     assert counts["targets"] == len(seed_demo.COMPANIES)
-    assert counts["prices"] > 0
-    assert counts["disclosures"] > 0
+    assert counts["themes"] > 0
 
 
 def test_production_database_names_are_not_allowed():
@@ -113,3 +112,61 @@ def test_downward_revision_exists():
     """上方修正だけのデモにしない。下方修正する企業も用意する。"""
     assert any(c.revision < 1.0 for c in seed_demo.COMPANIES)
     assert any(c.revision > 1.0 for c in seed_demo.COMPANIES)
+
+
+def test_prices_do_not_go_into_postgresql(demo_db):
+    """価格はPostgreSQLへ入れない。読み出し経路は分析層の1本だけである。"""
+    seed_demo.seed(demo_db, replace=True)
+
+    row = demo_db.execute("SELECT COUNT(*) AS n FROM market_price_observation").fetchone()
+
+    assert row["n"] == 0
+
+
+def test_financial_disclosures_do_not_go_into_postgresql(demo_db):
+    """財務もPostgreSQLへ入れない。読み出し経路は分析層の1本だけである。"""
+    seed_demo.seed(demo_db, replace=True)
+
+    for table in ("financial_disclosure", "financial_summary"):
+        row = demo_db.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+        assert row["n"] == 0, f"{table} に行が入っている"
+
+
+def test_demo_disclosures_match_the_real_parquet_schema(demo_db):
+    """デモの開示が実データと同じ列を持つ。読むコードは1本しかない。"""
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(seed_demo.__file__).resolve().parent))
+    from build_financial_parquet import DISCLOSURE_FIELDS, build_schema
+
+    schema = build_schema()
+    metadata = {name for name, _ in DISCLOSURE_FIELDS}
+    value_columns = [n for n in schema.names if n not in metadata]
+    counts = seed_demo.seed(demo_db, replace=True)
+
+    rows = seed_demo._build_disclosure_rows(counts["financial_run"], value_columns)
+
+    assert rows, "開示が生成されていない"
+    assert all(set(row) == set(schema.names) for row in rows)
+    assert all(row["jpx_code"] is None for row in rows)
+
+
+def test_demo_prices_carry_no_jpx_code(demo_db):
+    """架空企業に日本の証券コードは無い。security_keyがtarget_keyへ退避する前提。"""
+    counts = seed_demo.seed(demo_db, replace=True)
+    rows = seed_demo._build_price_rows(counts["price_run"])
+
+    assert rows, "価格が生成されていない"
+    assert all(row["jpx_code"] is None for row in rows)
+    assert {row["target_key"] for row in rows} == {c.key for c in seed_demo.COMPANIES}
+
+
+def test_demo_parquet_cannot_be_published_to_the_real_bucket(tmp_path):
+    """公開先を取り違えても実データのバケットへは書かせない。
+
+    公開APIのSAは実バケットに権限が無いので読めはしないが、書き込み自体を拒否して
+    「デモを実データのlakeへ混ぜる」事故を構造的に防ぐ。
+    """
+    with pytest.raises(SystemExit, match="invest-demo-lake"):
+        seed_demo.publish_demo_parquet(tmp_path, "gs://invest-dwh-db-storage/lake")

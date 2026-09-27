@@ -3,6 +3,7 @@
 pydantic-settings で .env を読み込む
 """
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings
 
@@ -27,6 +28,12 @@ class Settings(BaseSettings):
     # プランが提供しない直近日数と、遡れる年数。Freeは12週間(84日)前まで・2年分
     jquants_history_lag_days: int = 84
     jquants_history_years: int = 2
+    # 分析層（Parquet）のルート。`gs://bucket/lake` でもローカルパスでもよい。
+    # 配下の `observed/market_price` と `observed/financial_summary` を読む。
+    # **価格と財務はここからしか読まない。** 未設定だと両方のAPIが503になる。
+    # 公開デモはデモ用バケットを指す。分離はバケットの権限で担保しており、この値の
+    # 正しさには依存しない。
+    parquet_lake: str | None = None
     raw_data_path: str = "data/raw"
     # GitHub Actions等でrawを永続化するGCS prefix。ローカル開発では未設定でよい。
     raw_data_uri: str | None = None
@@ -42,6 +49,24 @@ class Settings(BaseSettings):
         # 廃止済みの設定が既存の .env に残っていても無視する。
         "extra": "ignore",
     }
+
+    @property
+    def database_environment(self) -> str:
+        """接続先がどの環境かを返す。
+
+        ローカルでは開発DBと実データDBで画面の見た目が変わらないため、
+        実データを開発DBだと思って編集する事故が起きる。接続先を画面へ出せるように、
+        接続文字列そのものではなく分類だけを公開する。
+        """
+        parsed = urlparse(self.database_url)
+        host = parsed.hostname or ""
+        database = (parsed.path or "").lstrip("/")
+
+        if host in ("localhost", "127.0.0.1", "postgres", "host.docker.internal"):
+            return "test" if database.endswith("_test") else "development"
+        if "demo" in database:
+            return "demo"
+        return "production"
 
     @property
     def legacy_db_path(self) -> Path:
