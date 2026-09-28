@@ -170,6 +170,20 @@ python scripts/derived.py daily_return --target 7203.T     # 計算して表示
 DuckDBはin-memoryで使い、`.duckdb`ファイルを作りません。データはParquetにあり、DuckDBは
 計算エンジンです。ファイルを作ると、それが第2の正本に見えてしまいます。
 
+#### 中身をブラウザで見る
+
+```bash
+cd backend
+python scripts/explore.py                          # data/parquet（実データ）
+python scripts/explore.py --lake ../data/demo-parquet
+python scripts/explore.py --lake gs://<bucket>/lake
+```
+
+DuckDB同梱のUI拡張をローカルで起動します。追加のインストールは要りません。
+APIが読むのと**同じview**（`preferred_price` / `financial_disclosure`）を張った状態で
+開くので、採用する観測の選び方まで含めて画面の値と同じものを確認できます。素の
+Parquetを見たい場合は `raw_market_price` / `raw_financial_summary` を使います。
+
 #### GCS上のParquetを直接読む
 
 `--parquet-glob` に `gs://` を渡すと、手元にコピーせずGCSのまま計算します。

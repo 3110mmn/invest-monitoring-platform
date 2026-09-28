@@ -58,7 +58,8 @@ flowchart TB
         Frontend["Cloud Run<br/>public frontend"]
         PublicAPI["Cloud Run<br/>public API / read-only"]
         AdminAPI["Cloud Run<br/>admin API / private"]
-        GCS[("Cloud Storage<br/>raw / pg_dump / lake Parquet")]
+        RealBucket[("Cloud Storage<br/>invest-dwh-db-storage<br/>raw / lake / pg_dump")]
+        DemoBucket[("Cloud Storage<br/>invest-demo-lake<br/>synthetic lake")]
     end
 
     RealDB[("Neon PostgreSQL<br/>実データ / 非公開")]
@@ -70,14 +71,19 @@ flowchart TB
         LocalDB[("Docker PostgreSQL<br/>開発DB")]
     end
 
-    User --> Frontend --> PublicAPI --> DemoDB
+    User --> Frontend --> PublicAPI
+    PublicAPI -->|"監視対象"| DemoDB
+    PublicAPI -->|"価格・財務<br/>DuckDB"| DemoBucket
     Owner --> LocalWeb --> LocalAPI
     LocalAPI -->|"接続先を選ぶ"| LocalDB
     LocalAPI -->|"app_writer"| RealDB
-    Owner -->|"IAM + admin key"| AdminAPI --> RealDB
+    LocalAPI -->|"ADC"| RealBucket
+    Owner -->|"IAM + admin key"| AdminAPI
+    AdminAPI -->|"監視対象"| RealDB
+    AdminAPI -->|"価格・財務<br/>DuckDB"| RealBucket
     Source --> Actions
     Actions -->|"ETL role"| RealDB
-    Actions --> GCS
+    Actions -->|"raw / lake / backup"| RealBucket
     Actions --> Registry
     Registry --> Frontend
     Registry --> PublicAPI
@@ -86,13 +92,25 @@ flowchart TB
     Secrets -.-> AdminAPI
 ```
 
+**公開APIから実データのバケットへ線がありません。** 引き忘れではなく、権限が無いので
+到達できません。バケットのIAMは次の1対1です。
+
+| バケット | 読めるサービスアカウント |
+|---|---|
+| `invest-dwh-db-storage`（実データ） | `invest-admin-runtime@` のみ |
+| `invest-demo-lake`（synthetic） | `invest-public-api-runtime@` のみ |
+
+日次ETLのサービスアカウントだけがプロジェクトレベルの `storage.objectAdmin` を持ち、
+rawとlakeを書きます。
+
 | サービス | 役割 |
 |---|---|
 | Cloud Run | Next.jsとFastAPIのコンテナを実行する |
 | Artifact Registry | デプロイ対象のDockerイメージを保管する |
 | Secret Manager | DB接続URLと管理キーを実行時に渡す |
-| GCS | rawレスポンス、`pg_dump`、分析層のParquetを保管する |
-| Neon PostgreSQL（実データ） | ETLと認証済み管理操作が更新する正本。公開しない |
+| GCS `invest-dwh-db-storage` | rawレスポンス（原本）、分析層のParquet、`pg_dump`。管理APIだけが読む |
+| GCS `invest-demo-lake` | syntheticなParquet。公開APIだけが読む |
+| Neon PostgreSQL（実データ） | 監視対象・テーマ・構成・取込メタデータ。価格と財務は持たない |
 | Neon PostgreSQL（デモ） | 公開APIが読むsynthetic data。実データと認証情報を共有しない |
 | GitHub Actions | CI、build、deploy、日次ETL、バックアップを自動化する |
 
@@ -101,15 +119,19 @@ flowchart TB
 公開APIと管理APIは同じDockerイメージを使い、Cloud Runサービス、環境変数、DBロール、IAMを
 変えて運用します。公開APIはアプリ側のread-only guardとDB側のread-only roleを重ねます。
 
-| 環境 | 接続先 | 公開範囲 | HTTP操作 | DB権限 |
-|---|---|---|---|---|
-| public | syntheticデモDB | 一般公開 | GET / HEAD / OPTIONS | SELECTのみ |
-| admin | 実データDB | 管理者のみ | CRUD | `app_writer`の限定的な読み書き |
-| daily ETL | 実データDB | 非公開 | バッチ | `etl_writer`の対象テーブル更新 |
-| migration | 実データDB | 非公開 | Alembic | Owner権限 |
-| local | Docker PostgreSQL | localhost | CRUD | 開発用権限 |
-| local admin | 実データDB | localhost | CRUD | `app_writer`。接続先を明示したときだけ |
-| CI | workflow内PostgreSQL | workflow内 | テスト中のみ | テスト用権限 |
+| 環境 | PostgreSQL | GCSバケット | 公開範囲 | HTTP操作 | DB権限 |
+|---|---|---|---|---|---|
+| public | syntheticデモDB | `invest-demo-lake` のみ | 一般公開 | GET / HEAD / OPTIONS | SELECTのみ |
+| admin | 実データDB | `invest-dwh-db-storage` のみ | 管理者のみ | CRUD | `app_writer`の限定的な読み書き |
+| daily ETL | 実データDB | 実データバケットへ書き込み | 非公開 | バッチ | `etl_writer`の対象テーブル更新 |
+| migration | 実データDB | — | 非公開 | Alembic | Owner権限 |
+| local | Docker PostgreSQL | — | localhost | CRUD | 開発用権限 |
+| local admin | 実データDB | 管理者のADCで実データバケット | localhost | CRUD | `app_writer`。接続先を明示したときだけ |
+| CI | workflow内PostgreSQL | — | workflow内 | テスト中のみ | テスト用権限 |
+
+**公開APIは実データのバケットに権限を持ちません。** 環境変数 `PARQUET_LAKE` を
+取り違えても実データは読めません。分離をコードの分岐ではなくIAMに置いているのは、
+設定の正しさに安全を依存させないためです。
 
 管理APIはCloud Run IAMと`X-Admin-Key`で保護し、管理用Secretをブラウザへ埋め込みません。スキーマ変更は
 日次ETLやアプリ起動時に行わず、リリース時にAlembicを明示実行します。

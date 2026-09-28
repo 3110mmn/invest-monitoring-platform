@@ -74,8 +74,7 @@ rawから再生成できる状態を保ちます。
 
 ### 目標の物理データフロー
 
-全市場・長期履歴を扱う段階では、価格・財務の本体をPostgreSQLへ無制限に蓄積せず、rawと
-正規化済みParquetをGCSへ保存します。DuckDBは永続化先ではなく、GCS上のParquetを読み取る
+価格・財務の本体はPostgreSQLへ蓄積せず、rawと正規化済みParquetをGCSへ保存します。DuckDBは永続化先ではなく、GCS上のParquetを読み取る
 参照・分析エンジンとして利用します。FastAPIはPostgreSQLのアプリケーション状態とDuckDBの価格・財務を
 API層で統合し、Next.jsへ同一の契約で提供します。
 
@@ -86,19 +85,19 @@ flowchart LR
     Raw[("GCS raw<br/>JSON.gz / immutable")]
     Transform["Normalize / Validate"]
     AppDB[("PostgreSQL<br/>Strategy / Theme / Target")]
-    Curated[("GCS lake/curated<br/>Parquet")]
+    Observed[("GCS lake/observed<br/>Parquet")]
     DuckDB["DuckDB<br/>read-only query engine"]
     Analysis["Analysis / Derived / Mart"]
-    Marts[("GCS lake/marts<br/>Parquet / optional")]
+    Marts[("GCS lake/marts<br/>Parquet / 未作成")]
     API["FastAPI"]
     Web["Next.js"]
 
     Sources --> Fetch --> Raw
     Raw --> Transform
-    Transform --> Curated
+    Transform --> Observed
     Transform -->|"取込メタデータ"| AppDB
     AppDB -->|"戦略・テーマ・監視対象"| API
-    Curated --> DuckDB
+    Observed --> DuckDB
     DuckDB -->|"監視対象の価格・財務"| API
     API --> Web
     DuckDB --> Analysis
@@ -109,14 +108,14 @@ flowchart LR
 | 保存・実行先 | 責務 | 正本性 |
 |---|---|---|
 | GCS `raw/` | APIレスポンス原本、取得時点の証跡、再処理元 | 取得原本・証跡の正本 |
-| GCS `lake/curated/` | 型・識別子・時点を統一した全市場の価格・財務Parquet | rawから再生成可能な分析用データセット |
-| GCS `lake/marts/` | リターン、期間集計、ファクター等の再計算可能な派生データ | curatedから再生成可能。必要になってから追加 |
+| GCS `lake/observed/` | 型・識別子・時点を統一した全市場の価格・財務Parquet | rawから再生成可能な分析用データセット |
+| GCS `lake/marts/` | リターン、期間集計、ファクター等の再計算可能な派生データ | **未作成。** Derivedは計算定義（`analytics/derived/*.sql`）として持ち、結果は保存していない |
 | PostgreSQL | Master、戦略、テーマ、監視対象、ユーザー入力、関係、設定、取込メタデータ | アプリケーション状態の正本。価格・財務は持たない |
 | DuckDB | Parquetの絞り込み、結合、集計 | 状態を持たない。正本にしない |
 | FastAPI | PostgreSQLとDuckDBの結果をWeb向けAPI契約へ統合 | 保存先ではなく統合境界 |
 
 画面表示では、PostgreSQLから戦略、テーマ、投資対象、監視対象と外部識別子を取得し、その識別子と期間を
-条件にDuckDBでcuratedまたはmartsの価格・財務を読みます。両データストアを直接JOINするのではなく、
+条件にDuckDBで`observed`の価格・財務を読みます。両データストアを直接JOINするのではなく、
 FastAPIのService層が識別子を受け渡してレスポンスを構成します。RouterへSQLや分析ロジックを直接置かず、
 PostgreSQLはRepository、DuckDBは分析Query Serviceへ委譲します。
 
