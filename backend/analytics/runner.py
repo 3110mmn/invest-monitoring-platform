@@ -83,6 +83,24 @@ def _release_handles_before_shutdown() -> None:
     _shutdown_hook_registered = True
 
 
+def _disable_adaptive_prefetching() -> None:
+    """gcsfsの適応的prefetchを切る。
+
+    実験的機能だが既定で有効で、読み出しごとに背景タスクを持つファイルを作る。DuckDBは
+    それを速やかに閉じないため、fsspecのIOスレッド側で回収されて `__del__` が例外を吐き、
+    asyncioも「Task was destroyed but it is pending」を出し続ける。処理は成功している
+    のにログがトレースバックで埋まり、本物のエラーが埋もれる。
+
+    切っても速度は変わらない（実測で中央値140ms→145ms、誤差の範囲）。gcsfs自身も
+    「100MB未満の読み出しには効かない」と書いており、ここのParquetは1ファイル
+    1〜10MBである。
+
+    **環境変数で切る。** この判定はファイルを開くたびに `os.environ` を読むので、
+    `fsspec.filesystem()` へkwargで渡しても届かない。利用者が明示していれば尊重する。
+    """
+    os.environ.setdefault("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
+
+
 def _register_gcs(connection: duckdb.DuckDBPyConnection) -> None:
     """GCSをfsspec（gcsfs）としてDuckDBへ差し込む。
 
@@ -103,6 +121,7 @@ def _register_gcs(connection: duckdb.DuckDBPyConnection) -> None:
         ) from exc
     _ensure_ca_bundle()
     _release_handles_before_shutdown()
+    _disable_adaptive_prefetching()
     connection.register_filesystem(fsspec.filesystem("gcs"))
 
 
@@ -133,9 +152,15 @@ def connect(parquet_glob: str = DEFAULT_PARQUET_GLOB) -> duckdb.DuckDBPyConnecti
     connection = open_connection(parquet_glob)
     connection.execute(
         f"CREATE OR REPLACE VIEW {PREFERRED_PRICE_VIEW} AS "
-        f"{build_query(load_definition(PREFERRED_PRICE_VIEW))}"
+        f"{build_query(load_definition(PREFERRED_PRICE_VIEW), glob=parquet_glob)}"
     )
     return connection
+
+
+def sql_literal(value: str) -> str:
+    """文字列をSQLのリテラルにする。パスに含まれる `'` を潰す。"""
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def lake_glob(lake: str, subpath: str) -> str:
@@ -146,28 +171,38 @@ def lake_glob(lake: str, subpath: str) -> str:
 def connect_lake(lake: str) -> duckdb.DuckDBPyConnection:
     """価格と財務の両方を読む接続を返す。APIが使う入口。
 
-    1つの接続で両方を扱う。DuckDBのsession変数へそれぞれのglobを束縛し、viewを張る。
-    接続を2つ持つと、温めるコストも終了処理も二重になる。
+    1つの接続で両方を扱う。接続を2つ持つと、温めるコストも終了処理も二重になる。
+
+    **viewの定義にはパスをリテラルで埋める。** session変数（`SET VARIABLE`）を参照すると、
+    viewはcatalogを共有する別sessionから見えるのに実体が `read_parquet(NULL)` になり、
+    `read_parquet cannot take NULL list as parameter` で落ちる。DuckDBのUIや `cursor()`
+    はいずれも別sessionなので、これを踏む。リテラルなら誰が開いても同じ結果になる。
     """
     price_glob = lake_glob(lake, PRICE_SUBPATH)
+    financial_glob = lake_glob(lake, FINANCIAL_SUBPATH)
     connection = open_connection(price_glob)
     connection.execute(
-        "SET VARIABLE financial_parquet_glob = ?", [lake_glob(lake, FINANCIAL_SUBPATH)]
-    )
-    connection.execute(
         f"CREATE OR REPLACE VIEW {PREFERRED_PRICE_VIEW} AS "
-        f"{build_query(load_definition(PREFERRED_PRICE_VIEW))}"
+        f"{build_query(load_definition(PREFERRED_PRICE_VIEW), glob=price_glob)}"
     )
     connection.execute(
-        f"CREATE OR REPLACE VIEW {FINANCIAL_DISCLOSURE_VIEW} AS "
-        "SELECT * FROM read_parquet("
-        "getvariable('financial_parquet_glob'), hive_partitioning = true)"
+        f"CREATE OR REPLACE VIEW {FINANCIAL_DISCLOSURE_VIEW} AS SELECT * FROM "
+        f"read_parquet({sql_literal(financial_glob)}, hive_partitioning = true)"
     )
     return connection
 
 
-def build_query(definition: str) -> str:
-    """定義中のプレースホルダを、DuckDBの変数参照へ置き換える。"""
+def build_query(definition: str, *, glob: str | None = None) -> str:
+    """定義中のプレースホルダを、入力の所在へ置き換える。
+
+    `glob` を渡すとリテラルを埋める。viewの定義に使う場合は必ずこちらにする。
+    session変数のままだと、別sessionからviewを開いたときに実体がNULLになる。
+    """
+    # targetを指定しない通常のDerived実行では全銘柄を対象にする。APIは必要な銘柄だけを
+    # window計算前に絞るため、repository側でこのplaceholderを明示的に置換する。
+    definition = definition.replace("$target_filter", "")
+    if glob is not None:
+        return definition.replace("$parquet_glob", sql_literal(glob))
     return definition.replace("$parquet_glob", "getvariable('parquet_glob')")
 
 

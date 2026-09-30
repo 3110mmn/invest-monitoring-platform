@@ -7,18 +7,12 @@ from app.etl.lineage import display_path, finish_run, stage_raw, start_run
 from app.etl.loaders import (
     ensure_data_source,
     record_ingestion_errors,
-    resolve_target_id,
-    upsert_financial_disclosures,
     upsert_investment_target_master,
-    upsert_prices,
 )
 from app.etl.models import ValidationIssue
 from app.etl.normalizers import (
-    normalize_jquants_financial,
     normalize_jquants_master,
-    normalize_jquants_price,
 )
-from app.etl.validators import validate_price
 
 
 def _write_raw(raw_dir: Path, job_type: str, run_id: int, records: list[dict[str, Any]]) -> Path:
@@ -156,110 +150,3 @@ class JQuantsMarketPipeline:
             records += len(rows)
 
         return {"dates": archived, "fetched": records, "failed": failed}
-
-    def sync_prices(self, *, codes: list[str], date_from: str | None = None,
-                    date_to: str | None = None) -> dict[str, int]:
-        job_type = "jquants_daily_prices_v1"
-        run_id = _start_run(self.conn, self.source_id, job_type, self.project_root,
-                            date_from, date_to, len(codes))
-        raw: list[dict[str, Any]] = []
-        fetch_errors = []
-        for code in codes:
-            try:
-                raw.extend(self.client.daily_prices(code=code, date_from=date_from, date_to=date_to))
-            except Exception as exc:
-                fetch_errors.append(ValidationIssue(code, "fetch_error", str(exc), True))
-
-        path = _write_raw(self.raw_dir, job_type, run_id, raw)
-        valid = []
-        validation_errors = []
-        for row in raw:
-            try:
-                record = normalize_jquants_price(row)
-                issues = validate_price(record)
-                if issues:
-                    validation_errors.extend(issues)
-                else:
-                    valid.append(record)
-            except (KeyError, TypeError, ValueError) as exc:
-                validation_errors.append(ValidationIssue(str(row.get("Code", "unknown")), "normalize_error", str(exc)))
-
-        loaded, load_errors = upsert_prices(
-            self.conn,
-            self.source_id,
-            valid,
-            ingestion_run_id=run_id,
-        )
-        record_ingestion_errors(self.conn, run_id, "fetch", fetch_errors)
-        record_ingestion_errors(self.conn, run_id, "validate", validation_errors)
-        record_ingestion_errors(self.conn, run_id, "load", load_errors)
-        failed = len(fetch_errors) + len(validation_errors) + len(load_errors)
-        status = "succeeded" if failed == 0 else "partial" if loaded else "failed"
-        _finish_run(self.conn, run_id, status=status, fetched=len(raw), loaded=loaded,
-                    skipped=len(validation_errors) + len(load_errors), failed=failed,
-                    raw_path=_display_path(path, self.project_root))
-        self.conn.commit()
-        return {"run_id": run_id, "fetched": len(raw), "loaded": loaded, "failed": failed}
-
-    def sync_financials(self, *, codes: list[str] | None = None,
-                        date: str | None = None) -> dict[str, int]:
-        """開示単位の財務サマリーを取得して保存する。
-
-        銘柄指定（`codes`）では契約プランの範囲にある全開示を銘柄ごとに取得する。
-        開示日指定（`date`）ではその日の全銘柄の開示を1リクエストで取得するため、
-        日次の増分取り込みに向く。どちらか一方だけを指定する。
-
-        開示日指定では追跡していない銘柄の開示も返るため、対応が無いものは
-        エラーではなく対象外として数える。
-        """
-        if (codes is None) == (date is None):
-            raise ValueError("codes と date はどちらか一方を指定してください")
-
-        job_type = "jquants_financial_summary_v1"
-        run_id = _start_run(self.conn, self.source_id, job_type, self.project_root,
-                            date, date, len(codes) if codes else 0)
-        raw: list[dict[str, Any]] = []
-        fetch_errors = []
-        # 開示日指定では1リクエストで済むため、ループ対象を1件だけにする。
-        targets: list[str | None] = list(codes) if codes else [None]
-        for target in targets:
-            try:
-                raw.extend(self.client.financial_summaries(code=target, date=date))
-            except Exception as exc:
-                fetch_errors.append(
-                    ValidationIssue(target or date or "unknown", "fetch_error", str(exc), True)
-                )
-
-        path = _write_raw(self.raw_dir, job_type, run_id, raw)
-        records = []
-        normalize_errors = []
-        for row in raw:
-            try:
-                records.append(normalize_jquants_financial(row))
-            except (KeyError, TypeError, ValueError) as exc:
-                normalize_errors.append(
-                    ValidationIssue(str(row.get("DiscNo", "unknown")), "normalize_error", str(exc))
-                )
-
-        untracked = 0
-        if date is not None:
-            tracked = [r for r in records if resolve_target_id(self.conn, self.source_id, r.jpx_code)]
-            untracked = len(records) - len(tracked)
-            records = tracked
-
-        loaded, load_errors = upsert_financial_disclosures(
-            self.conn, self.source_id, records, ingestion_run_id=run_id
-        )
-        record_ingestion_errors(self.conn, run_id, "fetch", fetch_errors)
-        record_ingestion_errors(self.conn, run_id, "normalize", normalize_errors)
-        record_ingestion_errors(self.conn, run_id, "load", load_errors)
-        failed = len(fetch_errors) + len(normalize_errors) + len(load_errors)
-        status = "succeeded" if failed == 0 else "partial" if loaded else "failed"
-        _finish_run(self.conn, run_id, status=status, fetched=len(raw), loaded=loaded,
-                    skipped=untracked + len(normalize_errors) + len(load_errors), failed=failed,
-                    raw_path=_display_path(path, self.project_root))
-        self.conn.commit()
-        return {
-            "run_id": run_id, "fetched": len(raw), "loaded": loaded,
-            "untracked": untracked, "failed": failed,
-        }

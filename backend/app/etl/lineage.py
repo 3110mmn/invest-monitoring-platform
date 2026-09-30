@@ -40,13 +40,44 @@ def display_path(path: Path, project_root: Path) -> str:
         return str(path)
 
 
+_warned_about_unpublished_raw = False
+
+
+def _warn_if_raw_has_nowhere_durable_to_go() -> None:
+    """rawの公開先が未設定なら一度だけ警告する。
+
+    **rawは原本である。** 手元にしか無い状態で放置すると、Parquetを作り直せる前提が
+    静かに崩れる。実際に2年分の財務バックフィルを手元で流したとき、`RAW_DATA_URI` が
+    未設定だったために487ファイルがこのマシンだけに残っていた。気づいたのは数日後で、
+    その間ずっと原本が1か所にしかなかった。
+
+    保存自体は止めない。取得できたものを捨てる方が損失が大きい。
+    """
+    global _warned_about_unpublished_raw
+    if _warned_about_unpublished_raw:
+        return
+    from app.config import settings
+
+    if settings.raw_data_uri:
+        return
+    _warned_about_unpublished_raw = True
+    print(
+        "  ! RAW_DATA_URI が未設定です。rawは手元にしか残りません。"
+        "取得を続けるなら backend/.env に公開先を設定し、"
+        "`python backend/scripts/publish_raw.py` で上げてください"
+    )
+
+
 def stage_raw(
     raw_dir: Path, source_key: str, job_type: str, run_id: int, records: list[dict[str, Any]]
 ) -> Path:
     """rawレスポンスをローカルへgzipで保存し、そのパスを返す。
 
     取得元をパスへ含めるのは、GCSへ上げたあとに取得元をまたいで探せるようにするため。
+
+    公開先が未設定なら警告する。rawは原本なので、手元にしか無い状態に気づかせる。
     """
+    _warn_if_raw_has_nowhere_durable_to_go()
     now = datetime.now(UTC)
     target = raw_dir / source_key / job_type / now.strftime("%Y/%m/%d") / f"run-{run_id}.json.gz"
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -40,13 +40,19 @@ def pipeline(db, tmp_path):
 
 
 def test_archive_saves_raw_without_loading_financials(db, pipeline):
-    """rawは残すが、financial_disclosure へは書かない。"""
-    market, _ = pipeline
+    """rawは残すが、PostgreSQLへは1行も書かない。
 
-    result = market.archive_financials(["2026-05-12"])
+    財務の置き場は分析層であり、`financial_disclosure` / `financial_summary` は
+    廃止した。書き込み先が存在しないことまで含めて固定する。
+    """
+    financial, _ = pipeline
 
-    assert result["fetched"] == 1
-    assert db.execute("SELECT COUNT(*) AS n FROM financial_disclosure").fetchone()["n"] == 0
+    result = financial.archive_financials(["2026-05-12"])
+
+    assert result["fetched"] >= 1
+    assert not _table_exists(db, "financial_disclosure")
+    assert not _table_exists(db, "financial_summary")
+
 
 
 def test_one_request_per_disclosure_date(db, pipeline):
@@ -99,3 +105,12 @@ def test_failed_date_does_not_stop_the_rest(db, tmp_path):
 
     assert result["dates"] == 1
     assert result["failed"] == 1
+
+
+def _table_exists(connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT COUNT(*) AS n FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = ?",
+        (table,),
+    ).fetchone()
+    return int(row["n"]) > 0

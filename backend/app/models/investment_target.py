@@ -49,6 +49,10 @@ class MarketPriceRead(BaseModel):
     close_price: float | None = None
     volume: float | None = None
     price_basis: str
+    # Derived。保存値ではなく、preferred_priceからリクエスト時に計算する。
+    # フィールド名は互換性のため維持するが、意味は現金配当を含まないPrice Return。
+    daily_return: float | None = None
+    cumulative_return: float | None = None
 
 
 class LatestMarketPriceRead(BaseModel):

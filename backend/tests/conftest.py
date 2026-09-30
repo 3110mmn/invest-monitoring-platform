@@ -31,9 +31,6 @@ from build_parquet import PRICE_SCHEMA
 TEST_DATABASE_NAMES = frozenset({"invest_test"})
 
 _TABLES = (
-    "financial_summary",
-    "financial_disclosure",
-    "market_price_observation",
     "theme_investment_target",
     "investment_target_identifier",
     "ingestion_error",

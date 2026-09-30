@@ -92,6 +92,19 @@ def test_days_window_excludes_older_observations(parquet_source):
     assert len(rows) == 1
 
 
+def test_price_history_includes_daily_and_period_cumulative_returns(parquet_source):
+    source = parquet_source([_row(2, 100.0), _row(1, 110.0), _row(0, 99.0)])
+
+    rows = source.price_history(TOYOTA, days=30)
+
+    assert rows[0]["daily_return"] is None
+    assert rows[0]["cumulative_return"] == pytest.approx(0.0)
+    assert rows[1]["daily_return"] == pytest.approx(0.1)
+    assert rows[1]["cumulative_return"] == pytest.approx(0.1)
+    assert rows[2]["daily_return"] == pytest.approx(-0.1)
+    assert rows[2]["cumulative_return"] == pytest.approx(-0.01)
+
+
 def test_jquants_is_preferred_over_yfinance_on_the_same_day(parquet_source):
     """採用の規則は `preferred_price` に一本化されている。画面とDerivedで食い違わせない。"""
     source = parquet_source(
@@ -202,6 +215,8 @@ def test_api_serves_parquet_prices_in_the_same_shape(client, db, parquet_source,
     assert [row["close_price"] for row in history.json()] == [200.0, 300.0]
     assert history.json()[0]["target_id"] == target_id
     assert history.json()[0]["source_key"] == "jquants"
+    assert history.json()[0]["cumulative_return"] == pytest.approx(0.0)
+    assert history.json()[1]["daily_return"] == pytest.approx(0.5)
     assert latest.status_code == 200, latest.text
     assert latest.json()[0]["latest_date"] == date.today().isoformat()
 
@@ -217,17 +232,20 @@ def test_api_still_reports_missing_target_from_the_control_plane(client, parquet
     assert client.get("/api/investment-targets/999999/prices").status_code == 404
 
 
-def test_cursor_does_not_inherit_the_input_location(parquet_source):
-    """`cursor()` はsessionを分けるため、束縛した所在を引き継がない。
+def test_views_work_from_another_session(parquet_source):
+    """別sessionからviewを開いても実体が残ること。
 
-    同時実行のために接続を分けたくなったとき、原因の見えない失敗
-    （read_parquet cannot take NULL list as parameter）を踏むのを防ぐ。
+    所在を `SET VARIABLE` で束縛したまま view を定義すると、catalogは共有される一方
+    session変数は引き継がれず、実体が `read_parquet(NULL)` になる。DuckDBのUIも
+    `cursor()` も別sessionなので、これを踏むと「Summary unavailable」とだけ表示され
+    理由が分からない。所在はviewの定義へリテラルで埋めてある。
     """
     source = parquet_source([_row(0, 300.0)])
 
     assert source.conn.execute("SELECT COUNT(*) FROM preferred_price").fetchone()[0] == 1
-    with pytest.raises(Exception, match="NULL"):
-        source.conn.cursor().execute("SELECT COUNT(*) FROM preferred_price").fetchone()
+    assert source.conn.cursor().execute(
+        "SELECT COUNT(*) FROM preferred_price"
+    ).fetchone()[0] == 1
 
 
 def test_app_starts_even_when_the_analytics_layer_is_unreachable(monkeypatch):

@@ -70,12 +70,7 @@ TODAY = date(2026, 9, 18)
 REVISION_FISCAL_YEAR = 2026
 PRICE_DAYS = 500
 
-# 価格と財務はもうPostgreSQLへ書かないが、移行前に投入した行を消すため対象に残す。
-# テーブルを削除する時点でここから外す。
 TRUNCATE_ORDER = (
-    "financial_summary",
-    "financial_disclosure",
-    "market_price_observation",
     "theme_investment_target",
     "investment_target_identifier",
     "ingestion_error",

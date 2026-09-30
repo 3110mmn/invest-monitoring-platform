@@ -31,6 +31,7 @@ from typing import Any
 
 import duckdb
 
+from analytics.runner import load_definition
 from app.analytics_connection import analytics_query_lock
 
 
@@ -52,6 +53,8 @@ class ParquetPriceSource:
         "price_basis",
         "source_key",
         "ingestion_run_id",
+        "daily_return",
+        "cumulative_return",
     )
 
     def __init__(self, connection: duckdb.DuckDBPyConnection) -> None:
@@ -63,10 +66,36 @@ class ParquetPriceSource:
         並び順はAPIの契約。画面は先頭を期間の開始日、末尾を最新として扱う。
         """
         cutoff = date.today() - timedelta(days=days)
+        # window計算前に1銘柄へ絞る。全市場をLAGしてから絞るとGCS上のParquetを
+        # 不必要に走査し、詳細画面の表示に数秒余計にかかる。
+        daily_return_query = load_definition("daily_return").replace("$target_filter", "WHERE target_key = ?")
         with analytics_query_lock():
             rows = self.conn.execute(
-                f"SELECT {', '.join(self._COLUMNS)} FROM preferred_price "
-                "WHERE target_key = ? AND obs_date >= ? ORDER BY obs_date ASC",
+                f"""
+                WITH daily AS (
+                    {daily_return_query}
+                ),
+                windowed AS (
+                    SELECT *
+                    FROM daily
+                    WHERE obs_date >= ?
+                )
+                SELECT
+                    obs_date, open_price, high_price, low_price, close_price,
+                    volume, price_basis, source_key, ingestion_run_id,
+                    daily_return,
+                    CASE
+                        WHEN close_price IS NULL THEN NULL
+                        WHEN FIRST_VALUE(close_price IGNORE NULLS) OVER (
+                            ORDER BY obs_date
+                        ) = 0 THEN NULL
+                        ELSE close_price / FIRST_VALUE(close_price IGNORE NULLS) OVER (
+                            ORDER BY obs_date
+                        ) - 1
+                    END AS cumulative_return
+                FROM windowed
+                ORDER BY obs_date ASC
+                """,
                 [target["target_key"], cutoff],
             ).fetchall()
         # `target_id` は分析層に無い。PostgreSQLのsurrogate keyなので書いていない。

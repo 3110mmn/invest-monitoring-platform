@@ -1,12 +1,7 @@
 from datetime import UTC, datetime
 
 from app.database import Connection
-from app.etl.models import (
-    FinancialRecord,
-    InvestmentTargetMasterRecord,
-    PriceRecord,
-    ValidationIssue,
-)
+from app.etl.models import InvestmentTargetMasterRecord, ValidationIssue
 
 
 def utc_now() -> datetime:
@@ -104,41 +99,6 @@ def resolve_target_id(conn: Connection, source_id: int, jpx_code: str) -> int | 
     return int(row["target_id"]) if row else None
 
 
-def upsert_prices(
-    conn: Connection,
-    source_id: int,
-    records: list[PriceRecord],
-    ingestion_run_id: int | None = None,
-) -> tuple[int, list[ValidationIssue]]:
-    loaded = 0
-    issues: list[ValidationIssue] = []
-    for record in records:
-        target_id = resolve_target_id(conn, source_id, record.jpx_code)
-        if target_id is None:
-            issues.append(ValidationIssue(record.jpx_code, "unknown_investment_target", "No active jpx_code mapping"))
-            continue
-        conn.execute(
-            """
-            INSERT INTO market_price_observation (
-                target_id, source_id, ingestion_run_id, obs_date,
-                open_price, high_price, low_price, close_price, volume,
-                price_basis, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'adjusted', CURRENT_TIMESTAMP)
-            ON CONFLICT(target_id, source_id, obs_date) DO UPDATE SET
-                ingestion_run_id = excluded.ingestion_run_id,
-                open_price = excluded.open_price, high_price = excluded.high_price,
-                low_price = excluded.low_price, close_price = excluded.close_price,
-                volume = excluded.volume, price_basis = excluded.price_basis,
-                fetched_at = excluded.fetched_at
-            """,
-            (target_id, source_id, ingestion_run_id, record.obs_date,
-             record.open_price, record.high_price,
-             record.low_price, record.close_price, record.volume),
-        )
-        loaded += 1
-    return loaded, issues
-
-
 def record_ingestion_errors(conn: Connection, run_id: int, stage: str, issues: list[ValidationIssue]) -> None:
     conn.executemany(
         """
@@ -149,95 +109,3 @@ def record_ingestion_errors(conn: Connection, run_id: int, stage: str, issues: l
         """,
         [(run_id, item.entity_key, stage, item.error_type, item.message, item.retryable) for item in issues],
     )
-
-
-def upsert_financial_disclosures(
-    conn: Connection,
-    source_id: int,
-    records: list[FinancialRecord],
-    ingestion_run_id: int | None = None,
-) -> tuple[int, list[ValidationIssue]]:
-    """開示単位で財務サマリーを保存する。
-
-    冪等キーは `(source_id, disclosure_number)`。訂正開示は開示番号が異なるため
-    元の開示を上書きせず別レコードとして残る。同じ開示番号の再取得は更新になる。
-    """
-    loaded = 0
-    issues: list[ValidationIssue] = []
-    now = utc_now()
-    for record in records:
-        target_id = resolve_target_id(conn, source_id, record.jpx_code)
-        if target_id is None:
-            issues.append(
-                ValidationIssue(
-                    record.jpx_code, "unknown_investment_target", "No active jpx_code mapping"
-                )
-            )
-            continue
-
-        conn.execute(
-            """
-            INSERT INTO financial_disclosure (
-                target_id, source_id, disclosure_number, disclosed_date, disclosed_time,
-                document_type, fiscal_period_type, period_start, period_end,
-                fiscal_year_start, fiscal_year_end, accounting_standard,
-                ingestion_run_id, source_record_hash, fetched_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_id, disclosure_number) DO UPDATE SET
-                target_id = excluded.target_id,
-                disclosed_date = excluded.disclosed_date,
-                disclosed_time = excluded.disclosed_time,
-                document_type = excluded.document_type,
-                fiscal_period_type = excluded.fiscal_period_type,
-                period_start = excluded.period_start,
-                period_end = excluded.period_end,
-                fiscal_year_start = excluded.fiscal_year_start,
-                fiscal_year_end = excluded.fiscal_year_end,
-                accounting_standard = excluded.accounting_standard,
-                ingestion_run_id = excluded.ingestion_run_id,
-                source_record_hash = excluded.source_record_hash,
-                fetched_at = excluded.fetched_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                target_id, source_id, record.disclosure_number, record.disclosed_date,
-                record.disclosed_time, record.document_type, record.fiscal_period_type,
-                record.period_start, record.period_end, record.fiscal_year_start,
-                record.fiscal_year_end, record.accounting_standard,
-                ingestion_run_id, record.source_record_hash, now, now, now,
-            ),
-        )
-        disclosure_row = conn.execute(
-            "SELECT disclosure_id FROM financial_disclosure "
-            "WHERE source_id = ? AND disclosure_number = ?",
-            (source_id, record.disclosure_number),
-        ).fetchone()
-        if disclosure_row is None:
-            raise RuntimeError(f"financial_disclosure was not created: {record.disclosure_number}")
-        disclosure_id = int(disclosure_row["disclosure_id"])
-
-        if not record.values:
-            issues.append(
-                ValidationIssue(
-                    record.disclosure_number,
-                    "empty_financial_summary",
-                    "採用できる財務値がありませんでした",
-                )
-            )
-            continue
-
-        columns = ["disclosure_id", "reporting_scope", *record.values.keys()]
-        assignments = ", ".join(f"{column} = excluded.{column}" for column in record.values)
-        conn.execute(
-            f"""
-            INSERT INTO financial_summary ({", ".join(columns)}, created_at, updated_at)
-            VALUES ({", ".join("?" for _ in columns)}, ?, ?)
-            ON CONFLICT(disclosure_id) DO UPDATE SET
-                reporting_scope = excluded.reporting_scope,
-                {assignments},
-                updated_at = excluded.updated_at
-            """,
-            (disclosure_id, record.reporting_scope, *record.values.values(), now, now),
-        )
-        loaded += 1
-    return loaded, issues

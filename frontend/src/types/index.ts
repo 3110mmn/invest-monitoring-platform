@@ -79,6 +79,10 @@ export interface MarketPrice {
   close_price: number | null;
   volume: number | null;
   price_basis: string;
+  /** DuckDBで算出した日次価格リターン。株式分割等は調整済み、現金配当は含まない */
+  daily_return: number | null;
+  /** 選択期間の最初の観測を0とした累積価格リターン。現金配当は含まない */
+  cumulative_return: number | null;
 }
 
 /**

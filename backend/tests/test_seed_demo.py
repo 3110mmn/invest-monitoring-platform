@@ -114,22 +114,22 @@ def test_downward_revision_exists():
     assert any(c.revision > 1.0 for c in seed_demo.COMPANIES)
 
 
-def test_prices_do_not_go_into_postgresql(demo_db):
-    """価格はPostgreSQLへ入れない。読み出し経路は分析層の1本だけである。"""
+def test_observed_tables_are_gone_from_the_demo_database(demo_db):
+    """デモDBにも価格・財務のテーブルは無い。
+
+    本番と同じmigrationを流すので、廃止したテーブルはデモ側からも消える。デモだけが
+    別のスキーマで動いていると、公開デモが本番と同じ経路を通る前提が崩れる。
+    """
     seed_demo.seed(demo_db, replace=True)
 
-    row = demo_db.execute("SELECT COUNT(*) AS n FROM market_price_observation").fetchone()
+    for table in ("market_price_observation", "financial_disclosure", "financial_summary"):
+        row = demo_db.execute(
+            "SELECT COUNT(*) AS n FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        ).fetchone()
+        assert int(row["n"]) == 0, f"{table} が残っている"
 
-    assert row["n"] == 0
-
-
-def test_financial_disclosures_do_not_go_into_postgresql(demo_db):
-    """財務もPostgreSQLへ入れない。読み出し経路は分析層の1本だけである。"""
-    seed_demo.seed(demo_db, replace=True)
-
-    for table in ("financial_disclosure", "financial_summary"):
-        row = demo_db.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
-        assert row["n"] == 0, f"{table} に行が入っている"
 
 
 def test_demo_disclosures_match_the_real_parquet_schema(demo_db):

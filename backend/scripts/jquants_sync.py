@@ -1,4 +1,4 @@
-"""J-Quants Phase 1A market-data ingestion entry point."""
+"""J-Quants market-data ingestion entry point."""
 
 import argparse
 import re
@@ -10,18 +10,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.config import settings
 from app.database import Connection, connect_database
-from app.etl.loaders import active_jquants_codes
 from app.etl.normalizers import target_key_to_jpx_code
 from app.etl.plan_window import PlanWindow, business_days, catch_up_range
 from app.etl.runtime import build_jquants_pipeline
-
-
-def years_ago(today: date, years: int) -> date:
-    """指定年数だけ遡った日付を返す。うるう日は同年2月28日へ寄せる。"""
-    try:
-        return today.replace(year=today.year - years)
-    except ValueError:
-        return today.replace(year=today.year - years, day=28)
 
 
 def iso_date(value: str) -> str:
@@ -150,31 +141,6 @@ def main() -> None:
     )
     master.add_argument("--date", type=iso_date, help="基準日 YYYY-MM-DD")
 
-    financials = subparsers.add_parser("financials", help="財務サマリーを同期")
-    financials_target = financials.add_mutually_exclusive_group()
-    financials_target.add_argument(
-        "--code", action="append", dest="codes", help="J-Quants Code。複数指定可"
-    )
-    financials_target.add_argument(
-        "--date",
-        type=iso_date,
-        help="開示日 YYYY-MM-DD。その日の全銘柄の開示を1リクエストで取得する",
-    )
-    financials_target.add_argument(
-        "--latest",
-        action="store_true",
-        help="契約プランで取得できる最新の開示日を同期する。日次実行向け",
-    )
-
-    prices = subparsers.add_parser(
-        "prices", help="日次株価を同期。期間を指定しなければ直近1年を取得する"
-    )
-    prices.add_argument("--code", action="append", dest="codes", help="J-Quants Code。複数指定可")
-    prices_period = prices.add_mutually_exclusive_group()
-    prices_period.add_argument("--years", type=int, help="本日から遡る年数")
-    prices_period.add_argument("--from", dest="date_from", type=iso_date, help="開始日 YYYY-MM-DD")
-    prices.add_argument("--to", dest="date_to", type=iso_date, help="終了日 YYYY-MM-DD（省略時は本日）")
-
     archive = subparsers.add_parser(
         "archive-prices",
         help="全銘柄の日次四本値をrawへ保存する。PostgreSQLへはロードしない",
@@ -210,15 +176,6 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    if args.command == "prices":
-        if args.years is not None and args.years < 1:
-            parser.error("--yearsは1以上を指定してください")
-        if (
-            args.date_from is not None
-            and args.date_to is not None
-            and args.date_from > args.date_to
-        ):
-            parser.error("--fromは--to以前の日付を指定してください")
 
     conn = connect_database(read_only=False)
     try:
@@ -252,50 +209,6 @@ def main() -> None:
                 return
             print(f"対象営業日（概算）: {len(dates)}日")
             result = pipeline.archive_financials(dates)
-        elif args.command == "financials":
-            if args.latest:
-                # プランが提供する最新日。遅延のないプランでは当日になる。
-                _, latest = PlanWindow(
-                    settings.jquants_history_lag_days, settings.jquants_history_years
-                ).bounds(date.today())
-                print(f"取得可能な最新の開示日: {latest}")
-                result = pipeline.sync_financials(date=latest.isoformat())
-            elif args.date:
-                result = pipeline.sync_financials(date=args.date)
-            else:
-                codes = args.codes or active_jquants_codes(conn)
-                if not codes:
-                    parser.error("--codeか--dateを指定するか、先にmasterを同期してください")
-                result = pipeline.sync_financials(codes=codes)
-        else:
-            codes = args.codes or active_jquants_codes(conn)
-            if not codes:
-                parser.error("--codeを指定するか、先にmasterを同期してください")
-            end = date.fromisoformat(args.date_to) if args.date_to else date.today()
-            start = (
-                date.fromisoformat(args.date_from)
-                if args.date_from
-                else years_ago(end, args.years or 1)
-            )
-            if start > end:
-                parser.error("開始日は終了日以前を指定してください")
-            # プランの提供範囲外を含むリクエストは全体が拒否されるため、先に収める。
-            window = PlanWindow(
-                settings.jquants_history_lag_days, settings.jquants_history_years
-            )
-            clamped = window.clamp(start, end, today=date.today())
-            if clamped is None:
-                earliest, latest = window.bounds(date.today())
-                parser.error(
-                    f"要求期間 {start}〜{end} はプランの提供範囲 {earliest}〜{latest} と重なりません"
-                )
-            if clamped != (start, end):
-                print(f"プランの提供範囲に合わせて {clamped[0]}〜{clamped[1]} へ調整しました")
-            result = pipeline.sync_prices(
-                codes=codes,
-                date_from=clamped[0].isoformat(),
-                date_to=clamped[1].isoformat(),
-            )
         print(result)
     finally:
         conn.close()

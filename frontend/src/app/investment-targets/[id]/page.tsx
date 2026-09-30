@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { use } from "react";
 import Link from "next/link";
 import PriceChart from "@/components/charts/PriceChart";
+import ReturnChart from "@/components/charts/ReturnChart";
 import {
   getFinancialOverview,
   getInvestmentTarget,
@@ -97,6 +98,7 @@ export default function InvestmentTargetDetailPage({
   const [disclosures, setDisclosures] = useState<FinancialDisclosure[]>([]);
   const [forecasts, setForecasts] = useState<FinancialDisclosure[]>([]);
   const [days, setDays] = useState(365);
+  const [chartMode, setChartMode] = useState<"price" | "return">("price");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -121,6 +123,10 @@ export default function InvestmentTargetDetailPage({
   // 実績は「実績を含む直近の開示」から取る。配当修正だけの開示が最新だと
   // latest_disclosure には実績が入っていないため。
   const actual = latest?.latest_actual ?? null;
+  const latestPrice = prices.at(-1) ?? null;
+
+  const formatPercent = (value: number | null | undefined) =>
+    value == null ? "—" : `${value >= 0 ? "+" : ""}${(value * 100).toFixed(2)}%`;
 
   return (
     <div className="space-y-8">
@@ -138,29 +144,61 @@ export default function InvestmentTargetDetailPage({
       </div>
 
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-lg font-semibold">価格</h2>
-          <div className="flex gap-1">
-            {PERIODS.map((p) => (
-              <button
-                key={p.days}
-                onClick={() => setDays(p.days)}
-                className={`px-3 py-1 rounded text-sm border ${
-                  days === p.days
-                    ? "bg-gray-800 text-white border-gray-800"
-                    : "border-gray-300 hover:bg-gray-100"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap gap-3">
+            <div className="flex gap-1">
+              {(["price", "return"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setChartMode(mode)}
+                  className={`px-3 py-1 rounded text-sm border ${
+                    chartMode === mode
+                      ? "bg-blue-700 text-white border-blue-700"
+                      : "border-gray-300 hover:bg-gray-100"
+                  }`}
+                >
+                  {mode === "price" ? "価格" : "累積価格リターン"}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {PERIODS.map((p) => (
+                <button
+                  key={p.days}
+                  onClick={() => setDays(p.days)}
+                  className={`px-3 py-1 rounded text-sm border ${
+                    days === p.days
+                      ? "bg-gray-800 text-white border-gray-800"
+                      : "border-gray-300 hover:bg-gray-100"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-        <PriceChart prices={prices} />
+        {chartMode === "price" ? <PriceChart prices={prices} /> : <ReturnChart prices={prices} />}
+        {latestPrice && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded border p-3">
+              <p className="text-xs text-gray-500">選択期間の累積価格リターン</p>
+              <p className="mt-1 text-xl font-semibold">
+                {formatPercent(latestPrice.cumulative_return)}
+              </p>
+            </div>
+            <div className="rounded border p-3">
+              <p className="text-xs text-gray-500">最新日次価格リターン</p>
+              <p className="mt-1 text-xl font-semibold">{formatPercent(latestPrice.daily_return)}</p>
+            </div>
+          </div>
+        )}
         {prices.length > 0 && (
           <p className="text-xs text-gray-500">
             {prices[0].obs_date} 〜 {prices[prices.length - 1].obs_date} / {prices.length}営業日 /
-            取得元 {prices[prices.length - 1].source_key} / {prices[prices.length - 1].price_basis}
+            取得元 {prices[prices.length - 1].source_key} / {prices[prices.length - 1].price_basis} /
+            リターン算出 DuckDB Derived（株式分割等調整済み・現金配当を含まない）
           </p>
         )}
       </section>

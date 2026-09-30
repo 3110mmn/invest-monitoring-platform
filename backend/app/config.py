@@ -19,8 +19,6 @@ class Settings(BaseSettings):
     backfill_years: int = 5
     cors_origins: list[str] = ["http://localhost:3000"]
     jquants_api_key: str | None = None
-    # 識別子の有無だけで日次の取得元を切り替えない。プランの提供期間を確認した上で明示的に有効化する。
-    jquants_daily_enabled: bool = False
     jquants_base_url: str = "https://api.jquants.com/v2"
     jquants_timeout_seconds: float = 30.0
     # プランごとのレート制限（回/分）。Free=5 / Light=60 / Standard=120 / Premium=500
@@ -35,7 +33,8 @@ class Settings(BaseSettings):
     # 正しさには依存しない。
     parquet_lake: str | None = None
     raw_data_path: str = "data/raw"
-    # GitHub Actions等でrawを永続化するGCS prefix。ローカル開発では未設定でよい。
+    # rawを永続化するGCS prefix。**取得を実行する環境では必ず設定する。**
+    # rawは原本で、Parquetもここから作り直す。未設定だと手元にしか残らない。
     raw_data_uri: str | None = None
     management_api_enabled: bool = False
     management_api_key: str | None = None

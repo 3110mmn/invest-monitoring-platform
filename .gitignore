@@ -18,6 +18,12 @@ data/parquet/
 # 公開デモ用のsynthetic Parquet。seed_demo.py が生成し、GCSへ公開する派生物。
 data/demo-parquet/
 
+# Next.js 16 が `npm run dev` のたびに生成するエージェント向け設定。成果物ではない。
+# `frontend/AGENTS.md` は公開スナップショットの除外対象（ルートの AGENTS.md）とは
+# 別パスなので、追跡すると公開リポジトリへ出てしまう。
+frontend/AGENTS.md
+frontend/CLAUDE.md
+
 # frontend
 frontend/node_modules/
 frontend/.next/

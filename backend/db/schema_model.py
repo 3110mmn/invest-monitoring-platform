@@ -329,9 +329,25 @@ def _parse_create_index(statement: str) -> Index:
 
 
 def _migration_sql(path: Path) -> str:
-    """Alembic migrationのupgrade内にある定数op.execute SQLを取り出す。"""
+    """Alembic migrationの `upgrade()` にある定数 `op.execute` のSQLを繋げて返す。
+
+    1本目のCREATE TABLEだけを拾っていると、後から足したmigrationのDROPやALTERが
+    見えない。`upgrade()` の中だけを見るのは、`downgrade()` のSQLを混ぜないため。
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
+    upgrade = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
+        ),
+        None,
+    )
+    if upgrade is None:
+        raise ValueError(f"upgrade() が見つかりません: {path}")
+
+    statements: list[str] = []
+    for node in ast.walk(upgrade):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         function = node.func
@@ -343,30 +359,44 @@ def _migration_sql(path: Path) -> str:
         ):
             continue
         value = node.args[0]
-        if (
-            isinstance(value, ast.Constant)
-            and isinstance(value.value, str)
-            and "CREATE TABLE" in value.value.upper()
-        ):
-            return value.value
-    raise ValueError(f"初期スキーマSQLが見つかりません: {path}")
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            statements.append(value.value)
+    if not statements:
+        raise ValueError(f"op.execute のSQLが見つかりません: {path}")
+    return ";\n".join(statements)
 
 
-def parse_schema(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> Schema:
-    """SQL定義を読み込み、テーブルとインデックスの構造モデルを返す。"""
-    path = Path(schema_path)
-    source = (
-        _migration_sql(path)
-        if path.suffix == ".py"
-        else path.read_text(encoding="utf-8")
-    )
-    sql = _strip_comments(source)
+DROP_TABLE = re.compile(
+    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z0-9_]+)", re.IGNORECASE
+)
+
+
+def parse_schema(schema_path: Path | str | list[Path] = DEFAULT_SCHEMA_PATH) -> Schema:
+    """SQL定義を読み込み、テーブルとインデックスの構造モデルを返す。
+
+    複数のmigrationを渡すと、順に適用した結果を返す。後のmigrationが落としたテーブルは
+    含めない。1本目だけを見ていると、廃止したテーブルが文書に残り続ける。
+    """
+    paths = [Path(p) for p in (schema_path if isinstance(schema_path, list) else [schema_path])]
     tables: list[Table] = []
     indexes: list[Index] = []
-    for statement in _split_statements(sql):
-        upper = statement.upper()
-        if upper.startswith("CREATE TABLE"):
-            tables.append(_parse_create_table(statement))
-        elif re.match(r"CREATE\s+(UNIQUE\s+)?INDEX", upper):
-            indexes.append(_parse_create_index(statement))
+    for path in paths:
+        source = (
+            _migration_sql(path)
+            if path.suffix == ".py"
+            else path.read_text(encoding="utf-8")
+        )
+        sql = _strip_comments(source)
+        for statement in _split_statements(sql):
+            upper = statement.upper()
+            if upper.startswith("CREATE TABLE"):
+                tables.append(_parse_create_table(statement))
+            elif re.match(r"CREATE\s+(UNIQUE\s+)?INDEX", upper):
+                indexes.append(_parse_create_index(statement))
+            elif upper.startswith("DROP TABLE"):
+                match = DROP_TABLE.match(statement)
+                if match:
+                    dropped = match.group(1)
+                    tables = [t for t in tables if t.name != dropped]
+                    indexes = [i for i in indexes if i.table != dropped]
     return Schema(tables=tables, indexes=indexes)

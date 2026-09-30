@@ -247,3 +247,19 @@ def test_shutdown_hook_is_registered_once(monkeypatch):
         "未回収のfsspecハンドルがあるとプロセスが終了しなくなるため必須だが、"
         "接続のたびに登録すると終了処理が積み上がる"
     )
+
+
+def test_views_are_readable_from_another_session(tmp_path):
+    """viewを別sessionから開いても実体が消えないこと。
+
+    所在を `SET VARIABLE` で束縛したまま view を定義すると、catalogは共有される一方
+    session変数は引き継がれず、実体が `read_parquet(NULL)` になる。DuckDBのUIも
+    `cursor()` も別sessionなので、画面に「Summary unavailable」とだけ出て理由が
+    分からない状態になる。実際にUIで踏んだ。
+    """
+    glob = _write_prices(tmp_path, [_price(1, 100.0)])
+    connection = connect(glob)
+
+    other = connection.cursor()
+
+    assert other.execute("SELECT COUNT(*) FROM preferred_price").fetchone()[0] == 1

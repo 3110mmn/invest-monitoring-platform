@@ -3,8 +3,6 @@ import json
 import pytest
 
 from app.etl.fetchers.jquants import JQuantsClient, JQuantsError
-from app.etl.loaders import ensure_data_source, upsert_investment_target_master, upsert_prices
-from app.etl.models import InvestmentTargetMasterRecord
 from app.etl.normalizers import normalize_jquants_price
 from app.etl.pipeline import JQuantsMarketPipeline
 from app.etl.validators import validate_price
@@ -115,33 +113,6 @@ def test_invalid_ohlc_is_rejected():
     assert {issue.error_type for issue in validate_price(record)} == {
         "invalid_high", "invalid_low", "negative_volume"
     }
-
-
-def test_price_loader_is_idempotent(db):
-    source_id = ensure_data_source(db, "jquants", "J-Quants")
-    upsert_investment_target_master(db, source_id, [
-        InvestmentTargetMasterRecord("86970", "8697.T", "JPX", "individual_stock", "0111")
-    ])
-    first = normalize_jquants_price({
-        "Code": "86970", "Date": "2026-08-26",
-        "AdjO": 100, "AdjH": 110, "AdjL": 95, "AdjC": 105, "AdjVo": 1000,
-    })
-    revised = normalize_jquants_price({
-        "Code": "86970", "Date": "2026-08-26",
-        "AdjO": 101, "AdjH": 111, "AdjL": 96, "AdjC": 106, "AdjVo": 1200,
-    })
-
-    assert upsert_prices(db, source_id, [first])[0] == 1
-    assert upsert_prices(db, source_id, [revised])[0] == 1
-    row = db.execute(
-        "SELECT COUNT(*) OVER () AS row_count, close_price, volume, source_id, price_basis "
-        "FROM market_price_observation LIMIT 1"
-    ).fetchone()
-    assert row is not None
-    assert (
-        row["row_count"], row["close_price"], row["volume"],
-        row["source_id"], row["price_basis"],
-    ) == (1, 106.0, 1200.0, source_id, "adjusted")
 
 
 def test_pipeline_records_raw_and_ingestion_metadata(db, tmp_path):

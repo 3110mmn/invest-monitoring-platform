@@ -77,13 +77,13 @@ DATABASE_URL="postgresql://invest:invest@localhost:5432/invest" \
 ### データ投入
 
 ```bash
-# 過去5年分のバックフィル（初回のみ）
 cd backend
-python scripts/jquants_sync.py prices --years 5
-
-# 日次更新（手動）
-python scripts/daily_update.py
+python scripts/daily_update.py            # 直近の価格をrawへ（yfinance）
 ```
+
+**価格も財務もPostgreSQLへは入りません。** 取得はrawで止め、そこからParquetを
+組み立てます。過去分の一括取得は下の `archive-prices --all` / `archive-financials --all`
+を使います。
 
 > 日次更新は GitHub Actions で毎日 UTC 21:00（JST 06:00）に自動実行されます。
 
@@ -103,6 +103,15 @@ python scripts/jquants_sync.py archive-financials --catch-up
 ```
 
 価格と財務で日付の決め方は共通です。片方だけ窓の扱いが違うと取りこぼしの原因になります。
+
+**手元で実行したら raw を公開してください。** rawは原本で、Parquetはそこから作り直します。
+
+```bash
+python scripts/publish_raw.py     # RAW_DATA_URI が要る
+```
+
+公開先が未設定のまま取得すると警告が出ます。一度これを見落とし、2年分の財務バックフィル
+487ファイルが1台のマシンにしか無い状態が数日続きました。
 
 日次ワークフローは `--catch-up` を使います。「取得可能な最新日だけ」を取ると、実行が失敗した
 日が穴として残ります。**前回アーカイブ済みの翌日から追いつく**ことで、次回実行で自動的に
@@ -151,15 +160,19 @@ python scripts/build_financial_parquet.py --base gs://<bucket>/lake --publish gs
 新しいrawが無い日（休場日など）は何もせず終わります。失敗ではありません。
 差分と全再構築の結果が一致することは実測で確認しています（215万行、双方向の差分0件）。
 
-`reconcile_parquet.py` は構造の検査（重複キー、OHLCの大小関係、負値）で異常終了し、
-PostgreSQLとの値の比較は乖離の分布を報告するだけで合否にしません。取得元が違うため、
-一致を条件にすると実態を隠すことになります。
+`reconcile_parquet.py` は構造の検査（重複キー、OHLCの大小関係、負値）で異常終了します。
+**PostgreSQLとの比較はもうありません。** 移行時の突合で終値の乖離が中央値0.00%だったことを
+確認したうえで、観測テーブルを廃止しました。
 
 ### Derivedを計算する
 
 `backend/analytics/derived/*.sql` が計算定義で、**この定義が正本です。** 結果は保存せず
 都度計算します。materializeするのは、高コスト・複数用途で共有・過去に提示した判断の
 Evidence、のいずれかが成立したときだけです。
+
+現在の`daily_return`と銘柄詳細画面の累積値は、調整済み終値を使った**価格リターン**です。
+株式分割・併合等による機械的な価格変動は補正しますが、現金配当は含みません。
+配当再投資込みのTotal Returnは、配当Observedを導入する将来フェーズで別指標として実装します。
 
 ```bash
 cd backend
@@ -174,12 +187,21 @@ DuckDBはin-memoryで使い、`.duckdb`ファイルを作りません。デー�
 
 ```bash
 cd backend
-python scripts/explore.py                          # data/parquet（実データ）
+python scripts/explore.py --lake gs://<bucket>/lake   # 日次で更新されている方
+python scripts/explore.py                             # 手元の data/parquet
 python scripts/explore.py --lake ../data/demo-parquet
-python scripts/explore.py --lake gs://<bucket>/lake
 ```
 
+**主な用途は、GCS上のlakeが日次で更新されているかの確認です。** そのため既定の所在は
+`PARQUET_LAKE`（APIが読むのと同じ設定）で、手元のコピーではありません。
+`data/parquet` は組み立てたときのまま止まる静的なコピーなので、既定にすると
+「更新されていない」と読み違えます。
+
+起動時に各取得元の最新日、財務の最新開示日、組み立て時刻を表示し、2日以上古ければ
+警告します。
+
 DuckDB同梱のUI拡張をローカルで起動します。追加のインストールは要りません。
+同時に複数開くときは `--port` を指定します。
 APIが読むのと**同じview**（`preferred_price` / `financial_disclosure`）を張った状態で
 開くので、採用する観測の選び方まで含めて画面の値と同じものを確認できます。素の
 Parquetを見たい場合は `raw_market_price` / `raw_financial_summary` を使います。
@@ -216,12 +238,12 @@ fsspec経由でgcsfsへ委譲するので、**鍵の発行は不要**でADCが�
 | `BACKFILL_YEARS` | バックフィル期間（年数） | `5` |
 | `CORS_ORIGINS` | 許可するオリジン | `["http://localhost:3000"]` |
 | `JQUANTS_API_KEY` | J-Quants V2 APIキー | 未設定 |
-| `JQUANTS_DAILY_ENABLED` | 日次更新でJ-Quantsを使うか。`false` の間は `jpx_code` の対応があってもyfinanceで取得する | `false` |
 | `JQUANTS_BASE_URL` | J-Quants V2 APIベースURL | `https://api.jquants.com/v2` |
 | `JQUANTS_TIMEOUT_SECONDS` | J-Quantsリクエストのタイムアウト秒数 | `30` |
 | `JQUANTS_REQUESTS_PER_MINUTE` | プランのレート制限（回/分）。この間隔で送信を自動調整する。Free=5 / Light=60 / Standard=120 / Premium=500 | `5` |
 | `PARQUET_LAKE` | 分析層のルート（例 `gs://bucket/lake`）。配下の `observed/market_price` と `observed/financial_summary` を読む。**価格と財務はここからしか読まない**ため、未設定だと両方のAPIが503になる。公開デモはデモ用バケットを指す | 未設定 |
 | `RAW_DATA_PATH` | 再加工用rawレスポンスの保存先 | `data/raw` |
+| `RAW_DATA_URI` | rawを永続化するGCS prefix。**取得を手元で実行するなら設定する。** rawは原本で、Parquetもここから作り直す | 未設定 |
 | `MANAGEMENT_API_ENABLED` | 管理APIを有効化し、変更操作へ管理キーを要求するか | `false` |
 | `MANAGEMENT_API_KEY` | 変更操作とデータ管理APIの `X-Admin-Key` 共有キー | 未設定 |
 

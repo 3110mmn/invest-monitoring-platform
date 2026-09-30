@@ -1,49 +1,25 @@
-from datetime import date
+"""日次の価格取得を検証する。
+
+**PostgreSQLへは価格を入れない。** この経路の成果物はrawであり、そこからParquetを
+組み立てる。したがってここで見るのは「どこから取り直すか」と「取得結果をrawの形へ
+正しく写せるか」である。
+
+再開位置は分析層の最終観測日から決める。以前は `market_price_observation` を見ていたが、
+そのテーブルは廃止した。
+"""
+
+from datetime import date, timedelta
 
 import pandas as pd
-import pytest
 
 from scripts.daily_update import (
+    DEFAULT_LOOKBACK_DAYS,
     REFETCH_OVERLAP_DAYS,
     frame_to_records,
-    partition_targets_by_price_source,
+    latest_observations,
     resolve_fetch_start,
-    upsert_price_records,
 )
 
-ASSETS = [
-    (1, "7203.T", "Toyota", "72030"),
-    (2, "VT", "Vanguard Total World Stock ETF", None),
-]
-
-
-def test_assets_are_routed_per_symbol_when_jquants_is_enabled():
-    codes, yfinance_targets = partition_targets_by_price_source(ASSETS, jquants_enabled=True)
-
-    assert codes == ["72030"]
-    assert yfinance_targets == [(2, "VT", "Vanguard Total World Stock ETF")]
-
-
-def test_all_assets_use_yfinance_when_jquants_is_disabled():
-    codes, yfinance_targets = partition_targets_by_price_source(ASSETS, jquants_enabled=False)
-
-    assert codes == []
-    assert yfinance_targets == [
-        (1, "7203.T", "Toyota"),
-        (2, "VT", "Vanguard Total World Stock ETF"),
-    ]
-
-
-@pytest.fixture
-def price_db(db):
-    """1銘柄・1取得元を登録した価格観測用のDB。"""
-    db.execute(
-        "INSERT INTO investment_target (target_key, target_name, target_type) "
-        "VALUES ('7203.T', 'トヨタ', 'individual_stock')"
-    )
-    db.execute("INSERT INTO data_source (source_key, source_name) VALUES ('yfinance', 'yfinance')")
-    db.commit()
-    return db
 
 def _price_frame(dates, volume=True):
     data = {
@@ -57,114 +33,82 @@ def _price_frame(dates, volume=True):
     return pd.DataFrame(data, index=pd.to_datetime(dates))
 
 
-def _save(db, target_id, source_id, dates, volume=True):
-    """テスト用にrun_idを用意してUPSERTする。来歴の記録込みで検証する。"""
-    row = db.execute(
-        """
-        INSERT INTO ingestion_run (job_type, source_id, status)
-        VALUES ('yfinance_daily_prices_v1', ?, 'running') RETURNING ingestion_run_id
-        """,
-        (source_id,),
-    ).fetchone()
-    run_id = int(row["ingestion_run_id"])
-    records = frame_to_records("TEST", _price_frame(dates, volume=volume))
-    return upsert_price_records(db, target_id, source_id, run_id, records)
+def test_fetch_start_uses_default_lookback_without_observations():
+    """観測が無い銘柄は既定の遡及日数から取得する。
 
+    初期投入は日次更新の役割ではない。ここで長期間を取りにいかない。
+    """
+    start = resolve_fetch_start({}, "7203.T", today=date(2026, 9, 12), default_lookback_days=7)
 
-def test_fetch_start_uses_default_lookback_without_observations(price_db):
-    """観測が無い銘柄は既定の遡及日数から取得する。"""
-    start = resolve_fetch_start(price_db, 1, 1, today=date(2026, 9, 12), default_lookback_days=7)
     assert start == date(2026, 9, 5)
 
 
-def test_fetch_start_resumes_from_last_observation_with_overlap(price_db):
-    """最終観測日から重複分だけ遡って再取得する。"""
-    _save(price_db, 1, 1, ["2026-08-20"])
+def test_fetch_start_resumes_from_last_observation_with_overlap():
+    """最終観測日から重複分だけ遡って再取得する。
 
-    start = resolve_fetch_start(price_db, 1, 1, today=date(2026, 9, 12))
+    固定窓では実行が飛んだ期間の穴が埋まらない。直近数日は訂正や確定遅れがあるため
+    重ねて取り直す。
+    """
+    latest = {"7203.T": date(2026, 8, 20)}
 
-    assert start == date(2026, 8, 20) - pd.Timedelta(days=REFETCH_OVERLAP_DAYS).to_pytimedelta()
+    start = resolve_fetch_start(latest, "7203.T", today=date(2026, 9, 12))
 
-
-def test_fetch_start_is_independent_per_source(price_db):
-    """取得元ごとに最終観測日を判定する。"""
-    price_db.execute("INSERT INTO data_source (source_key, source_name) VALUES ('jquants', 'J-Quants')")
-    _save(price_db, 1, 1, ["2026-09-10"])
-
-    assert resolve_fetch_start(price_db, 1, 2, today=date(2026, 9, 12), default_lookback_days=7) == date(2026, 9, 5)
+    assert start == date(2026, 8, 20) - timedelta(days=REFETCH_OVERLAP_DAYS)
 
 
-def test_all_fetched_rows_are_saved_with_volume(price_db):
-    """取得した全営業日を保存し、出来高も記録する。"""
-    saved = _save(price_db, 1, 1, ["2026-09-08", "2026-09-09", "2026-09-10"])
+def test_fetch_start_is_decided_per_symbol():
+    """銘柄ごとに最終観測日を判定する。まとめて1つの起点にしない。"""
+    latest = {"7203.T": date(2026, 9, 10)}
 
-    rows = price_db.execute(
-        "SELECT obs_date, close_price, volume FROM market_price_observation ORDER BY obs_date"
-    ).fetchall()
-    assert saved == 3
-    assert [r[0] for r in rows] == [date(2026, 9, 8), date(2026, 9, 9), date(2026, 9, 10)]
-    assert [r[2] for r in rows] == [1000.0, 2000.0, 3000.0]
-
-
-def test_refetching_the_same_range_is_idempotent(price_db):
-    """同じ期間を取り直しても行は増えず、値が更新される。"""
-    _save(price_db, 1, 1, ["2026-09-08", "2026-09-09"])
-    updated = _price_frame(["2026-09-08", "2026-09-09"])
-    updated["Close"] = [999.0, 888.0]
-    run = price_db.execute(
-        """
-        INSERT INTO ingestion_run (job_type, source_id, status)
-        VALUES ('yfinance_daily_prices_v1', 1, 'running') RETURNING ingestion_run_id
-        """
-    ).fetchone()
-    upsert_price_records(
-        price_db, 1, 1, int(run["ingestion_run_id"]), frame_to_records("TEST", updated)
+    toyota = resolve_fetch_start(latest, "7203.T", today=date(2026, 9, 12))
+    other = resolve_fetch_start(
+        latest, "6758.T", today=date(2026, 9, 12), default_lookback_days=7
     )
 
-    rows = price_db.execute(
-        "SELECT obs_date, close_price FROM market_price_observation ORDER BY obs_date"
-    ).fetchall()
-    assert [(row["obs_date"], row["close_price"]) for row in rows] == [
-        (date(2026, 9, 8), 999.0),
-        (date(2026, 9, 9), 888.0),
-    ]
+    assert toyota == date(2026, 9, 7)
+    assert other == date(2026, 9, 5)
 
 
-def test_jquants_daily_routing_is_disabled_by_default():
-    """識別子があっても、日次のJ-Quants取得は明示的に有効化するまで使わない。
+def test_missing_analytics_layer_falls_back_to_the_default_lookback():
+    """分析層へ繋がらなくても取得を止めない。
 
-    プランの提供期間外だと、J-Quants経路へ振り分けた銘柄がどこからも取得できなくなる。
+    取得が止まるより取りすぎる方へ倒す。rawは冪等に組み直せるが、取り漏らした日は
+    後から気づきにくい。
     """
-    from app.config import Settings
-
-    assert Settings().jquants_daily_enabled is False
-
-
-def test_saved_observations_record_which_run_loaded_them(price_db):
-    """観測はどの取込実行で入ったかを持つ。
-
-    yfinance経路はこれを記録しておらず、価格711行すべてが来歴を持たない状態だった。
-    rawへ遡れないだけでなく、いつ入った値かも分からなくなる。
-    """
-    _save(price_db, 1, 1, ["2026-09-08", "2026-09-09"])
-
-    rows = price_db.execute(
-        "SELECT ingestion_run_id FROM market_price_observation"
-    ).fetchall()
-
-    assert all(row["ingestion_run_id"] is not None for row in rows)
+    assert latest_observations(None, "yfinance") == {}
+    assert latest_observations("/nonexistent-lake", "yfinance") == {}
 
 
-def test_reloading_updates_the_run_reference(price_db):
-    """取り直したら、最後に入れた実行が記録される。"""
-    _save(price_db, 1, 1, ["2026-09-08"])
-    first = price_db.execute(
-        "SELECT ingestion_run_id FROM market_price_observation"
-    ).fetchone()["ingestion_run_id"]
+def test_all_fetched_rows_become_records_with_volume():
+    """取得した全営業日をrawの行へ写し、出来高も残す。"""
+    frame = _price_frame(["2026-09-08", "2026-09-09", "2026-09-10"])
 
-    _save(price_db, 1, 1, ["2026-09-08"])
-    second = price_db.execute(
-        "SELECT ingestion_run_id FROM market_price_observation"
-    ).fetchone()["ingestion_run_id"]
+    records = frame_to_records("7203.T", frame)
 
-    assert second != first
+    assert [r["obs_date"] for r in records] == ["2026-09-08", "2026-09-09", "2026-09-10"]
+    assert [r["volume"] for r in records] == [1000.0, 2000.0, 3000.0]
+    assert all(r["target_key"] == "7203.T" for r in records)
+
+
+def test_volume_is_null_when_the_source_omits_it():
+    """出来高が無い取得元でもゼロで埋めない。"""
+    records = frame_to_records("7203.T", _price_frame(["2026-09-08"], volume=False))
+
+    assert records[0]["volume"] is None
+
+
+def test_records_keep_the_four_prices_unchanged():
+    """四本値は加工せずそのまま写す。再現できる範囲を正直に保つため。"""
+    records = frame_to_records("7203.T", _price_frame(["2026-09-08"]))
+
+    assert (records[0]["open"], records[0]["high"], records[0]["low"], records[0]["close"]) == (
+        100.0,
+        110.0,
+        90.0,
+        105.0,
+    )
+
+
+def test_default_lookback_is_short_enough_to_stay_a_daily_job():
+    """既定の遡及は日次の範囲に留める。初期投入はバックフィルの役割である。"""
+    assert DEFAULT_LOOKBACK_DAYS <= 14

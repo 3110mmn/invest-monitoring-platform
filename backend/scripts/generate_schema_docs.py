@@ -26,13 +26,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from db.schema_model import Schema, Table, parse_schema
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_PATH = (
-    REPO_ROOT
-    / "backend"
-    / "migrations"
-    / "versions"
-    / "0001_initial_postgresql.py"
-)
+# Alembicのmigrationを**全て**順に適用した結果が現在のスキーマになる。1本目だけを
+# 見ていると、後から落としたテーブルが文書に残り続ける。
+MIGRATIONS_DIR = REPO_ROOT / "backend" / "migrations" / "versions"
+
+
+def migration_paths() -> list[Path]:
+    """適用順のmigrationを返す。ファイル名の連番を順序とする。"""
+    return sorted(p for p in MIGRATIONS_DIR.glob("*.py") if not p.name.startswith("__"))
 REFERENCE_PATH = REPO_ROOT / "docs" / "data" / "schema-reference.md"
 ER_DIAGRAM_PATH = REPO_ROOT / "docs" / "data" / "er-diagram.md"
 DICTIONARY_PATH = REPO_ROOT / "docs" / "data" / "schema-data-dictionary.md"
@@ -326,7 +327,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="書き込まず差分の有無だけ判定する")
     args = parser.parse_args()
 
-    schema = parse_schema(SCHEMA_PATH)
+    schema = parse_schema(migration_paths())
     outputs = build_outputs(schema)
     problems = check_dictionary(schema)
 

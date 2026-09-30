@@ -19,9 +19,6 @@ TABLES = (
     "ingestion_error",
     "investment_target_identifier",
     "theme_investment_target",
-    "market_price_observation",
-    "financial_disclosure",
-    "financial_summary",
 )
 
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -33,9 +30,6 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "ingestion_error": ("error_id",),
     "investment_target_identifier": ("investment_target_identifier_id",),
     "theme_investment_target": ("theme_id", "target_id"),
-    "market_price_observation": ("log_id",),
-    "financial_disclosure": ("disclosure_id",),
-    "financial_summary": ("disclosure_id",),
 }
 
 IDENTITY_COLUMNS = {
@@ -46,8 +40,6 @@ IDENTITY_COLUMNS = {
     "ingestion_run": "ingestion_run_id",
     "ingestion_error": "error_id",
     "investment_target_identifier": "investment_target_identifier_id",
-    "market_price_observation": "log_id",
-    "financial_disclosure": "disclosure_id",
 }
 
 BOOLEAN_COLUMNS = {

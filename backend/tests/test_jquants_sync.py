@@ -1,5 +1,4 @@
 import argparse
-from datetime import date
 
 import pytest
 
@@ -9,7 +8,6 @@ from scripts.jquants_sync import (
     find_unmapped_jquants_codes,
     iso_date,
     sync_missing_masters,
-    years_ago,
 )
 
 
@@ -123,10 +121,6 @@ def test_sync_missing_masters_reports_nothing_to_do(db):
 
     assert sync_missing_masters(pipeline, db) == ([], [])
     assert pipeline.calls == []
-
-
-def test_years_ago_handles_leap_day():
-    assert years_ago(date(2024, 2, 29), 1) == date(2023, 2, 28)
 
 
 def test_active_jquants_codes_uses_only_current_primary_identifiers(db):

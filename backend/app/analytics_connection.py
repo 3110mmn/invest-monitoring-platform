@@ -6,11 +6,13 @@
 
 `settings.parquet_lake` が未設定ならNoneのままで、価格と財務のAPIは503を返す。
 
-**この接続を `cursor()` で分けてはいけない。** DuckDBの `cursor()` は新しいsessionを
-作るが、入力の所在は `SET VARIABLE` でsessionに束縛してあるため引き継がれない。
-`preferred_price` view の実体が `read_parquet(NULL)` になり、
-`read_parquet cannot take NULL list as parameter` という原因の見えない失敗になる。
-同時実行を増やしたくなった場合は、接続を分けるのではなく `connect()` をもう一度呼ぶ。
+viewの定義には所在をリテラルで埋めてあるため、`cursor()` で分けた別sessionからも
+読める。以前は `SET VARIABLE` を参照しており、別sessionでは実体が
+`read_parquet(NULL)` になって落ちた（DuckDBのUIで踏んだ）。
+
+ただし同じ接続オブジェクトを複数スレッドから使うことは依然できない。result setが
+別クエリのもので上書きされるため、`analytics_query_lock` で直列化している。
+並列度を上げたくなったら、スレッドごとに `cursor()` を持たせる形にできる。
 """
 
 from __future__ import annotations

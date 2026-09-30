@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from app.database import Connection
@@ -30,13 +30,6 @@ def _legacy_database(path: Path) -> None:
             VALUES ('legacy', 'Legacy source', 1)
             """
         )
-        connection.execute(
-            """
-            INSERT INTO market_price_observation (
-                target_id, source_id, obs_date, close_price, price_basis, fetched_at
-            ) VALUES (1, 1, '2026-09-19', 1234.5, 'adjusted', '2026-09-20 00:00:00')
-            """
-        )
         connection.commit()
     finally:
         connection.close()
@@ -51,18 +44,15 @@ def test_import_sqlite_converts_types_and_counts(
     counts = import_sqlite_database(source, db, replace=True)
     db.commit()
 
+    # 価格・財務のテーブルは廃止したため、移行の対象からも外れている。
     assert counts["strategy"] == 4
-    assert counts["market_price_observation"] == 1
+    assert "market_price_observation" not in counts
     strategy = db.execute(
         "SELECT * FROM strategy WHERE strategy_key = ?", ("legacy",)
     ).fetchone()
-    price = db.execute("SELECT * FROM market_price_observation").fetchone()
     assert strategy is not None
     assert strategy["is_active"] is True
     assert isinstance(strategy["created_at"], datetime)
-    assert price is not None
-    assert price["obs_date"] == date(2026, 9, 19)
-    assert isinstance(price["fetched_at"], datetime)
 
 
 def test_import_sqlite_refuses_non_empty_destination(

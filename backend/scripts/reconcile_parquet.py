@@ -1,17 +1,18 @@
-"""Parquet（分析層）とPostgreSQL（配信層）を突合する。
+"""分析層のParquetが、変換の不具合を持っていないかを検査する。
 
-**値の完全一致は期待しない。** PostgreSQLの価格はyfinanceと移行前の`legacy_unknown`由来、
-Parquetの価格はJ-Quantsの調整済み値で、取得元も調整基準日も違う。同じ日の終値が一致
-しないこと自体は異常ではない。
+**比較相手はもう無い。** 以前はPostgreSQLの `market_price_observation` と終値を
+突き合わせていたが、価格をParquetからしか読まなくなり、そのテーブルは削除した。
+移行時の突合では終値の乖離が中央値0.00%で、構造検査も通っていた。
 
-したがってここでは2種類を分けて扱う。
+残したのは、Parquet自身の健全性を見る検査である。比較相手が無くても、次のような
+変換の不具合は検出できる。
 
-- **構造の検査** … 一致しなければ変換の不具合。検出したら異常終了する
-  （重複キー、OHLCの大小関係、プラン窓の外の日付、銘柄数の急減）
-- **値の比較** … 取得元差を含むため、乖離の分布を報告するだけで合否にしない
+- 同じ (銘柄, 日付, 取得元) が二重にある
+- 高値 < 安値、終値が高安の外側にあるなど、四本値の大小関係が壊れている
+- 価格や出来高が負
 
-「揃っているように見せる」ことではなく、**ずれの大きさと理由を説明できる状態**を作るのが
-目的である。
+異常があれば終了コード1で止める。取得漏れの可能性など、判断が要るものは警告として
+報告するだけにして合否に混ぜない。
 
 使い方:
     python backend/scripts/reconcile_parquet.py --parquet data/parquet
@@ -29,7 +30,6 @@ import duckdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.database import connect_database
 
 # 取得元が違えば調整基準も違うため、この程度のずれは異常ではない。
 # これを超える銘柄は、列の取り違えや桁違いを疑う。
@@ -132,97 +132,8 @@ def check_structure(con: duckdb.DuckDBPyConnection, source: str) -> list[Finding
     return findings
 
 
-def compare_with_postgres(
-    con: duckdb.DuckDBPyConnection, source: str
-) -> list[Finding]:
-    """PostgreSQLと重なる範囲で終値を比べ、乖離の分布を報告する。
-
-    取得元が違うため合否にはしない。桁違いだけを疑う。
-    """
-    findings: list[Finding] = []
-    connection = connect_database(read_only=True)
-    try:
-        rows = connection.execute(
-            """
-            SELECT t.target_key, s.source_key, p.obs_date, p.close_price
-            FROM market_price_observation p
-            JOIN investment_target t USING (target_id)
-            JOIN data_source s USING (source_id)
-            WHERE p.close_price IS NOT NULL
-            """
-        ).fetchall()
-    finally:
-        connection.close()
-
-    if not rows:
-        return [Finding(False, "PostgreSQLに比較できる価格がありません")]
-
-    con.execute(
-        "CREATE OR REPLACE TABLE pg_prices (target_key VARCHAR, source_key VARCHAR, "
-        "obs_date DATE, close_price DOUBLE)"
-    )
-    con.executemany(
-        "INSERT INTO pg_prices VALUES (?, ?, ?, ?)",
-        [
-            (r["target_key"], r["source_key"], r["obs_date"], float(r["close_price"]))
-            for r in rows
-        ],
-    )
-
-    matched = con.execute(
-        f"""
-        SELECT g.target_key, g.source_key, COUNT(*) AS n,
-               MEDIAN(ABS(q.close_price - g.close_price) / g.close_price) AS median_diff,
-               MAX(ABS(q.close_price - g.close_price) / g.close_price) AS max_diff
-        FROM pg_prices g
-        JOIN read_parquet('{source}', hive_partitioning=true) q
-          ON q.target_key = g.target_key AND q.obs_date = g.obs_date
-        GROUP BY 1, 2 ORDER BY 1, 2
-        """
-    ).fetchall()
-
-    if not matched:
-        return [Finding(True, "PostgreSQLとParquetで重なる (銘柄, 日付) が1件もありません")]
-
-    print("\n  終値の乖離（取得元が違うため一致は期待しない）")
-    print(f"    {'銘柄':<10} {'PG側取得元':<16} {'件数':>5} {'中央値':>9} {'最大':>9}")
-    for target_key, source_key, n, median_diff, max_diff in matched:
-        print(
-            f"    {target_key:<10} {source_key:<16} {n:>5} "
-            f"{median_diff:>8.2%} {max_diff:>8.2%}"
-        )
-        if median_diff > SUSPICIOUS_RELATIVE_DIFF:
-            findings.append(
-                Finding(
-                    True,
-                    f"{target_key}（{source_key}）の乖離中央値が {median_diff:.0%}。"
-                    "列の取り違えや桁違いを疑う",
-                )
-            )
-
-    # PostgreSQLにあってParquetに無い日を数える。窓の外は対象外。
-    missing = scalar(
-        con,
-        f"""
-        SELECT COUNT(*) FROM pg_prices g
-        WHERE g.obs_date BETWEEN
-              (SELECT MIN(obs_date) FROM read_parquet('{source}', hive_partitioning=true))
-          AND (SELECT MAX(obs_date) FROM read_parquet('{source}', hive_partitioning=true))
-          AND NOT EXISTS (
-              SELECT 1 FROM read_parquet('{source}', hive_partitioning=true) q
-              WHERE q.target_key = g.target_key AND q.obs_date = g.obs_date
-          )
-        """,
-    )
-    if missing:
-        findings.append(
-            Finding(False, f"PostgreSQLにあってParquetに無い (銘柄, 日付) {missing:,}件")
-        )
-    return findings
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="ParquetとPostgreSQLを突合する")
+    parser = argparse.ArgumentParser(description="Parquetの構造を検査する")
     parser.add_argument("--parquet", type=Path, default=Path("data/parquet"))
     args = parser.parse_args()
 
@@ -231,9 +142,6 @@ def main() -> int:
 
     print("=== Parquetの構造 ===")
     findings = check_structure(con, source)
-
-    print("\n=== PostgreSQLとの比較 ===")
-    findings.extend(compare_with_postgres(con, source))
 
     fatal = [f for f in findings if f.fatal]
     warnings = [f for f in findings if not f.fatal]

@@ -41,9 +41,6 @@
 | `ingestion_error` | ETL内部生成 | 取得・正規化・検証・保存時のエラー記録 |
 | `investment_target_identifier` | 外部API・システム変換 | 銘柄マスタ同期、識別子管理処理 |
 | `theme_investment_target` | ユーザー入力 | Relationship API |
-| `market_price_observation` | 外部API | 価格ETL |
-| `financial_disclosure` | 外部API | 財務ETLの開示メタデータ正規化 |
-| `financial_summary` | 外部API・ETL変換 | 財務ETLの数値正規化 |
 
 ### データ区分
 
@@ -67,9 +64,6 @@
 | 取得基盤 | `ingestion_error` | 1実行内の1エラー |
 | 識別子 | `investment_target_identifier` | 1銘柄の1外部識別子と有効期間 |
 | 関連 | `theme_investment_target` | 1テーマと1銘柄の関連 |
-| 時系列 | `market_price_observation` | 1銘柄・1取引日 |
-| 財務 | `financial_disclosure` | 1開示番号 |
-| 財務 | `financial_summary` | 1開示に対応する1財務サマリー |
 
 
 ## 4. マスタ
@@ -129,7 +123,7 @@
 | 列 | 定義 |
 | --- | --- |
 | `ingestion_run_id` | 実行ID |
-| `job_type` | パイプライン種別と契約バージョン。例: `jquants_daily_prices_v1`, `jquants_financial_summary_v1` |
+| `job_type` | パイプライン種別と契約バージョン。例: `jquants_market_prices_archive_v1`, `jquants_financial_archive_v1` |
 | `git_commit_sha` | 実行した取得・変換・検証コードのGitコミットSHA。Git外や開発中の実行では `NULL` 可 |
 | `source_id` | 取得元 |
 | `status` | `running` / `succeeded` / `partial` / `failed` |
@@ -192,104 +186,12 @@
 
 ## 7. 時系列データ
 
-### `market_price_observation`
-
-> **このテーブルはAPIから読まれません。** 価格の読み出しはGCS Parquetへ移りました
-> （[アーキテクチャ](../architecture.md)）。現在は日次ETLが書き込み続けていますが、
-> それはParquetとの突合の基準線として残しているためで、突合が済み次第このテーブルごと
-> 廃止します。
-
-1銘柄・1取得元・1取引日を一意とし、キーは `(target_id, source_id, obs_date)` です。同じ日の
-複数取得元を別観測として保持します。
-
-| 列 | 定義 |
-| --- | --- |
-| `log_id` | 主キー |
-| `target_id` | 銘柄・指数 |
-| `source_id` | 価格の取得元。`data_source`を参照 |
-| `ingestion_run_id` | 取得・変換した実行。手動・旧データでは`NULL`可 |
-| `obs_date` | 取引日 |
-| `open_price`, `high_price`, `low_price`, `close_price` | 調整後OHLCを優先。どちらを使うかは取得処理単位で統一 |
-| `volume` | 調整後出来高を優先。指数など非提供の場合は `NULL` |
-| `price_basis` | `adjusted` / `unadjusted` / `unknown` |
-| `fetched_at` | 基盤が価格を取得・再取得した日時 |
-| `note` | 補足・品質情報 |
-| `created_at` | 作成日時 |
-
-価格の通貨は `investment_target.currency` に従います。欠損価格をゼロとして保存しません。移行前の価格は
-取得元を`legacy_unknown`、調整区分を`unknown`として保持し、来歴を推測しません。
-
-単日前日比や状態判定は元の時系列と評価ルールから再計算できるため保存しません。必要な場合は将来のAssessment領域で、期間・ルール・評価時点を明示して導出します。
 
 ## 8. 財務データ
-
-### `financial_disclosure`
-
-> **このテーブルと `financial_summary` はAPIから読まれません。** 財務の読み出しも
-> GCS Parquetへ移りました。日次ETLの書き込みも停止済みで、廃止待ちです。
-
-開示の識別・期間・取得由来を保持します。一意キーは `(source_id, disclosure_number)` です。同じ決算期でも訂正開示番号が異なれば別レコードとして残します。
-
-| 列 | 定義 |
-| --- | --- |
-| `disclosure_id` | 内部開示ID |
-| `target_id` | 開示企業 |
-| `source_id` | 開示取得元 |
-| `disclosure_number` | 取得元の開示番号。J-Quants `DiscNo` |
-| `disclosed_date` | 開示日 |
-| `disclosed_time` | 開示時刻 |
-| `document_type` | 書類種別。J-Quants `DocType` |
-| `fiscal_period_type` | `1Q`, `2Q`, `3Q`, `FY` 等 |
-| `period_start`, `period_end` | 当該報告期間 |
-| `fiscal_year_start`, `fiscal_year_end` | 会計年度期間 |
-| `accounting_standard` | `JGAAP`, `IFRS`, `USGAAP` 等の取得元表記 |
-| `ingestion_run_id` | 取り込んだ実行。手動登録等では `NULL` 可 |
-| `source_record_hash` | 正規化前レコードの改変検知用ハッシュ |
-| `fetched_at` | APIから取得した日時 |
-| `created_at`, `updated_at` | DB作成・更新日時 |
-
-### `financial_summary`
-
-`financial_disclosure` と1対0..1です。金額は円、株式数は株、EPS・BPS・一株配当は円/株で保持します。J-Quantsの空文字および会計基準上存在しない値は `NULL` にします。
-
-| 分類 | 列 | 型 | 定義 |
-|---|---|---|---|
-| キー | `disclosure_id` | BIGINT | 主キーかつ開示への外部キー。開示削除時はCASCADE |
-| 範囲 | `reporting_scope` | TEXT | `consolidated` / `non_consolidated` |
-| 実績 | `revenue` | BIGINT | 売上高・営業収益 |
-| 実績 | `operating_income` | BIGINT | 営業利益 |
-| 実績 | `ordinary_income` | BIGINT | 経常利益。IFRS等では `NULL` 可 |
-| 実績 | `net_income` | BIGINT | 親会社株主帰属相当の当期純利益 |
-| 実績 | `eps` | DOUBLE PRECISION | 1株当たり利益 |
-| 財政状態 | `total_assets`, `equity` | BIGINT | 総資産、純資産相当額 |
-| 財政状態 | `bps` | DOUBLE PRECISION | 1株当たり純資産 |
-| CF | `operating_cash_flow` | BIGINT | 営業活動CF |
-| CF | `investing_cash_flow` | BIGINT | 投資活動CF |
-| CF | `financing_cash_flow` | BIGINT | 財務活動CF |
-| CF | `cash_equivalents` | BIGINT | 現金及び現金同等物期末残高 |
-| 今期予想 | `forecast_revenue` | BIGINT | 売上予想 |
-| 今期予想 | `forecast_operating_income` | BIGINT | 営業利益予想 |
-| 今期予想 | `forecast_ordinary_income` | BIGINT | 経常利益予想 |
-| 今期予想 | `forecast_net_income` | BIGINT | 純利益予想 |
-| 今期予想 | `forecast_eps` | DOUBLE PRECISION | EPS予想 |
-| 翌期予想 | `next_forecast_revenue` | BIGINT | 翌期売上予想 |
-| 翌期予想 | `next_forecast_operating_income` | BIGINT | 翌期営業利益予想 |
-| 翌期予想 | `next_forecast_ordinary_income` | BIGINT | 翌期経常利益予想 |
-| 翌期予想 | `next_forecast_net_income` | BIGINT | 翌期純利益予想 |
-| 翌期予想 | `next_forecast_eps` | DOUBLE PRECISION | 翌期EPS予想 |
-| 配当 | `annual_dividend_per_share` | DOUBLE PRECISION | 年間1株配当実績 |
-| 配当 | `forecast_annual_dividend_per_share` | DOUBLE PRECISION | 年間1株配当予想 |
-| 株式数 | `shares_outstanding` | BIGINT | 期末発行済株式数 |
-| 株式数 | `treasury_shares` | BIGINT | 期末自己株式数 |
-| 株式数 | `average_shares` | BIGINT | 期中平均株式数 |
-| 監査 | `created_at`, `updated_at` | TIMESTAMPTZ | DB作成・更新日時 |
-
-連結値が存在する場合は連結値を採用します。連結値が存在しない企業のみ非連結値を採用し、その選択を `reporting_scope` に記録します。異なる範囲の値を同じ行に混在させません。
 
 ## 9. 削除・履歴保持方針
 
 - マスタは原則物理削除せず、`is_active = FALSE` にします。
 - 時系列、取込履歴、財務開示は再現性確保のため履歴を保持します。
-- `financial_disclosure` を削除した場合のみ、対応する `financial_summary` が `ON DELETE CASCADE` で削除されます。
 - その他の外部キーには自動削除を設定していません。参照中の親レコード削除は失敗させます。
 - rawデータ本体はDB外に保存し、`ingestion_run.raw_path` から追跡します。

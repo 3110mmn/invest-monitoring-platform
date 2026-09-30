@@ -39,14 +39,17 @@ def pipeline(db, tmp_path):
 
 
 def test_archive_saves_raw_without_loading_prices(db, pipeline):
-    """rawは残すが、market_price_observation へは書かない。"""
+    """rawは残すが、PostgreSQLへは1行も書かない。
+
+    価格の置き場は分析層であり、`market_price_observation` は廃止した。書き込み先が
+    存在しないことまで含めて、この経路がrawで止まることを固定する。
+    """
     market, _ = pipeline
 
     result = market.archive_market_prices(["2026-07-01"])
 
     assert result["fetched"] == 2
-    rows = db.execute("SELECT COUNT(*) AS n FROM market_price_observation").fetchone()
-    assert rows["n"] == 0
+    assert not _table_exists(db, "market_price_observation")
 
 
 def test_archive_records_the_run_and_raw_path(db, pipeline):
@@ -124,3 +127,12 @@ def test_client_rejects_code_and_date_together():
 
     with pytest.raises(ValueError):
         client.daily_prices()
+
+
+def _table_exists(connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT COUNT(*) AS n FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = ?",
+        (table,),
+    ).fetchone()
+    return int(row["n"]) > 0
