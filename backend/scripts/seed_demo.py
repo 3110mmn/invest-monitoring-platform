@@ -162,13 +162,13 @@ THEMES = [
      "電力需要の増加と電源構成の転換"),
 ]
 
-# テーマと銘柄の対応。重みは合計1.0に揃えず、実際の構成比計算を働かせる。
+# テーマと銘柄のMaster上の対応。配分・採用理由などの判断データは含めない。
 THEME_MEMBERS = [
-    ("ai-data-center", "ALPHA.DEMO", 0.6, "AI向け半導体の売上構成比が最も高い"),
-    ("ai-data-center", "GAMMA.DEMO", 0.4, "データセンター向け電力供給の担い手"),
-    ("factory-automation", "BETA.DEMO", 1.0, "産業用ロボットの主要サプライヤ"),
-    ("energy-transition", "GAMMA.DEMO", 0.7, "再生可能エネルギーの発電事業"),
-    ("energy-transition", "ALPHA.DEMO", 0.3, "電力変換向けパワー半導体"),
+    ("ai-data-center", "ALPHA.DEMO"),
+    ("ai-data-center", "GAMMA.DEMO"),
+    ("factory-automation", "BETA.DEMO"),
+    ("energy-transition", "GAMMA.DEMO"),
+    ("energy-transition", "ALPHA.DEMO"),
 ]
 
 
@@ -301,14 +301,14 @@ def _insert_masters(connection: Connection, source_id: int) -> dict[str, int]:
             (target_ids[company.key], source_id, company.key.split(".")[0], date(2020, 4, 1)),
         )
 
-    for theme_key, target_key, weight, rationale in THEME_MEMBERS:
+    for theme_key, target_key in THEME_MEMBERS:
         connection.execute(
             """
             INSERT INTO theme_investment_target
-                (theme_id, target_id, basket_weight, rationale)
-            VALUES (?, ?, ?, ?)
+                (theme_id, target_id)
+            VALUES (?, ?)
             """,
-            (theme_ids[theme_key], target_ids[target_key], weight, rationale),
+            (theme_ids[theme_key], target_ids[target_key]),
         )
     return target_ids
 

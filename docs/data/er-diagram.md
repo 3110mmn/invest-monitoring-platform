@@ -30,7 +30,7 @@ erDiagram
 | `investment_target_identifier` | 内部銘柄とJ-Quants Code、ticker等の対応 |
 | `ingestion_run` | データ取得・ETLの実行履歴と件数 |
 | `ingestion_error` | 実行中の部分失敗と再試行可否 |
-| `theme_investment_target` | テーマ×銘柄（basket_weight） |
+| `theme_investment_target` | テーマ×銘柄の所属期間。現在行は`effective_to IS NULL` |
 
 ## 役割別構成
 

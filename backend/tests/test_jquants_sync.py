@@ -36,19 +36,19 @@ def test_target_key_to_jpx_code(target_key, expected):
     assert target_key_to_jpx_code(target_key) == expected
 
 
-def _add_target(conn, target_key, is_active=True):
+def _add_target(conn, target_key, is_monitored=True):
     return conn.execute(
-        "INSERT INTO investment_target (target_key, target_name, target_type, is_active) "
+        "INSERT INTO investment_target (target_key, target_name, target_type, is_monitored) "
         "VALUES (?, ?, 'individual_stock', ?)",
-        (target_key, target_key, is_active),
+        (target_key, target_key, is_monitored),
     ).lastrowid
 
 
-def test_unmapped_codes_are_derived_from_active_targets(db):
-    """対応が無い有効な日本株だけがCodeとして導出される。"""
+def test_unmapped_codes_are_derived_from_monitored_targets(db):
+    """対応が無い監視中の日本株だけがCodeとして導出される。"""
     _add_target(db, "7203.T")
     _add_target(db, "408A.T")
-    _add_target(db, "9984.T", is_active=False)
+    _add_target(db, "9984.T", is_monitored=False)
     _add_target(db, "AAPL")
 
     assert find_unmapped_jquants_codes(db) == ["408A0", "72030"]

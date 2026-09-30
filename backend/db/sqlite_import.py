@@ -29,7 +29,7 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "ingestion_run": ("ingestion_run_id",),
     "ingestion_error": ("error_id",),
     "investment_target_identifier": ("investment_target_identifier_id",),
-    "theme_investment_target": ("theme_id", "target_id"),
+    "theme_investment_target": ("membership_id",),
 }
 
 IDENTITY_COLUMNS = {
@@ -40,10 +40,12 @@ IDENTITY_COLUMNS = {
     "ingestion_run": "ingestion_run_id",
     "ingestion_error": "error_id",
     "investment_target_identifier": "investment_target_identifier_id",
+    "theme_investment_target": "membership_id",
 }
 
 BOOLEAN_COLUMNS = {
     "is_active",
+    "is_monitored",
     "is_primary",
     "retryable",
 }
@@ -130,9 +132,32 @@ def _upsert_rows(
     if not rows:
         return 0
 
+    if table == "theme_investment_target":
+        values = []
+        for row in rows:
+            created_at = _convert_value("created_at", row["created_at"])
+            updated_at = _convert_value("updated_at", row["updated_at"])
+            effective_to = None if bool(row["is_active"]) else updated_at
+            values.append(
+                (row["theme_id"], row["target_id"], created_at, effective_to, created_at, updated_at)
+            )
+        target.executemany(
+            """
+            INSERT INTO theme_investment_target (
+                theme_id, target_id, effective_from, effective_to, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (theme_id, target_id) WHERE effective_to IS NULL DO NOTHING
+            """,
+            values,
+        )
+        return len(rows)
+
     target_columns = _target_columns(target, table)
     source_columns = list(rows[0].keys())
-    columns = [column for column in source_columns if column in target_columns]
+    source_for_target = {column: column for column in source_columns if column in target_columns}
+    if table == "investment_target" and "is_active" in source_columns:
+        source_for_target["is_monitored"] = "is_active"
+    columns = list(source_for_target)
     if not columns:
         raise RuntimeError(f"No compatible columns found for {table}")
 
@@ -149,7 +174,13 @@ def _upsert_rows(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT ({conflict}) {action}"
     )
-    values = [tuple(_convert_value(column, row[column]) for column in columns) for row in rows]
+    values = [
+        tuple(
+            _convert_value(column, row[source_for_target[column]])
+            for column in columns
+        )
+        for row in rows
+    ]
     target.executemany(query, values)
     return len(rows)
 

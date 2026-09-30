@@ -155,7 +155,7 @@ CRUDはできても`CREATE TABLE`・`DROP TABLE`・`TRUNCATE`はすべて`permis
 
 | データ | 正本・保存先 | 書き手 |
 |---|---|---|
-| 実データのMaster / Observed | 実データPostgreSQL | 日次ETL、認証済み管理API |
+| 実データのMaster / Control Plane | 実データPostgreSQL | 日次ETL、認証済み管理API |
 | 公開デモデータ（戦略・テーマ・銘柄・構成） | デモPostgreSQL | `seed_demo.py` |
 | 公開デモデータ（価格・財務） | GCS `invest-demo-lake` Parquet | `seed_demo.py --publish` |
 | DBバックアップ | GCS `postgres-backups/` | GitHub Actions |

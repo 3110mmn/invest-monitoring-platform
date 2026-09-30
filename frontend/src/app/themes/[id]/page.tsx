@@ -6,9 +6,8 @@ import {
   getTheme,
   getThemeInvestmentTargets,
   removeThemeInvestmentTarget,
-  upsertThemeInvestmentTarget,
+  addThemeInvestmentTarget,
 } from "@/lib/api";
-import { activeWeightTotal, compositionRatio } from "@/lib/weights";
 import { PUBLIC_READ_ONLY } from "@/lib/runtime";
 import type { InvestmentTarget, ThemeConstituent, ThemeDetail } from "@/types";
 
@@ -28,10 +27,6 @@ const TARGET_TYPE_LABELS: Record<string, string> = {
   commodity: "商品",
 };
 
-function formatWeight(weight: number | null): string {
-  return weight === null ? "—" : weight.toFixed(2);
-}
-
 export default function ThemeDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const themeId = Number(use(params).id);
   const [theme, setTheme] = useState<ThemeDetail | null>(null);
@@ -42,9 +37,6 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
 
   // 追加フォームの入力
   const [newTargetId, setNewTargetId] = useState<number | "">("");
-  const [newWeight, setNewWeight] = useState("1.0");
-  
-  const [newRationale, setNewRationale] = useState("");
   const reloadConstituents = () =>
     getThemeInvestmentTargets(themeId).then(setConstituents);
 
@@ -75,25 +67,17 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
   const addConstituent = () =>
     mutate(async () => {
       if (newTargetId === "") return;
-      await upsertThemeInvestmentTarget(themeId, {
+      await addThemeInvestmentTarget(themeId, {
         target_id: newTargetId,
-        basket_weight: Number(newWeight) || 0,
-        rationale: newRationale.trim() || null,
       });
       setNewTargetId("");
-      setNewWeight("1.0");
-      setNewRationale("");
     });
 
   if (error) return <p className="text-red-600">{error}</p>;
   if (!theme) return <p className="text-gray-500">読み込み中...</p>;
 
-  const activeTotalWeight = activeWeightTotal(constituents);
-  // 既に有効な紐付けがある銘柄は選択肢から外す。無効な紐付けは行の「戻す」で復帰させる。
-  const linkedActiveIds = new Set(
-    constituents.filter((c) => c.relation_is_active).map((c) => c.target_id),
-  );
-  const selectableTargets = allTargets.filter((t) => !linkedActiveIds.has(t.target_id));
+  const linkedIds = new Set(constituents.map((c) => c.target_id));
+  const selectableTargets = allTargets.filter((t) => !linkedIds.has(t.target_id));
 
   return (
     <div className="space-y-8">
@@ -118,12 +102,12 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
       </div>
 
       <section className="space-y-2">
-        <h2 className="text-lg font-semibold">投資仮説</h2>
+        <h2 className="text-lg font-semibold">テーマ概要</h2>
         {theme.description ? (
           <p className="text-sm whitespace-pre-wrap leading-relaxed">{theme.description}</p>
         ) : (
           <p className="text-gray-500 text-sm">
-            仮説が未記入です。なぜこのテーマに投資するのかを残しておくと、後から検証できます。
+            テーマの説明が未記入です。
           </p>
         )}
       </section>
@@ -142,20 +126,13 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
                 <tr className="bg-gray-100 text-left">
                   <th className="px-3 py-2">銘柄</th>
                   <th className="px-3 py-2">種別</th>
-                  <th className="px-3 py-2 text-right">ウェイト</th>
-                  <th className="px-3 py-2 text-right">構成比</th>
-                  <th className="px-3 py-2">採用理由</th>
+                  <th className="px-3 py-2">所属開始</th>
                   {!PUBLIC_READ_ONLY && <th className="px-3 py-2 text-right">操作</th>}
                 </tr>
               </thead>
               <tbody>
                 {constituents.map((c) => (
-                  <tr
-                    key={c.target_id}
-                    className={`border-t hover:bg-gray-50 ${
-                      c.relation_is_active ? "" : "text-gray-400"
-                    }`}
-                  >
+                  <tr key={c.membership_id} className="border-t hover:bg-gray-50">
                     <td className="px-3 py-2">
                       <Link
                         href={`/investment-targets/${c.target_id}`}
@@ -168,44 +145,21 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
                     <td className="px-3 py-2">
                       {c.target_type ? TARGET_TYPE_LABELS[c.target_type] ?? c.target_type : "—"}
                     </td>
-                    <td className="px-3 py-2 text-right font-mono">
-                      {formatWeight(c.basket_weight)}
+                    <td className="px-3 py-2 text-gray-600">
+                      {new Date(c.effective_from).toLocaleDateString("ja-JP")}
                     </td>
-                    <td className="px-3 py-2 text-right font-mono">
-                      {compositionRatio(c, activeTotalWeight)?.toFixed(1).concat("%") ?? "—"}
-                    </td>
-                    <td className="px-3 py-2 text-gray-600">{c.theme_rationale ?? "—"}</td>
                     {!PUBLIC_READ_ONLY && (
                       <td className="px-3 py-2 text-right whitespace-nowrap">
-                        {c.relation_is_active ? (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              mutate(() => removeThemeInvestmentTarget(themeId, c.target_id))
-                            }
-                            className="text-sm text-red-600 hover:underline disabled:opacity-50"
-                          >
-                            外す
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              mutate(() =>
-                                upsertThemeInvestmentTarget(themeId, {
-                                  target_id: c.target_id,
-                                  basket_weight: c.basket_weight ?? 1,
-                                  rationale: c.theme_rationale,
-                                }),
-                              )
-                            }
-                            className="text-sm text-blue-600 hover:underline disabled:opacity-50"
-                          >
-                            戻す
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() =>
+                            mutate(() => removeThemeInvestmentTarget(themeId, c.target_id))
+                          }
+                          className="text-sm text-red-600 hover:underline disabled:opacity-50"
+                        >
+                          外す
+                        </button>
                       </td>
                     )}
                   </tr>
@@ -215,9 +169,8 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         )}
         <p className="text-xs text-gray-500">
-          構成比は<strong>有効な</strong>構成銘柄のウェイト合計に対する比率です。保有金額ではありません。
-          テーマから外した銘柄はウェイトを記録として残しますが、構成比には含めません。
-          {!PUBLIC_READ_ONLY && "「外す」は記録を消さず無効にします。"}
+          テーマとの対応はMasterの所属関係です。配分や採用理由などの判断データはここへ保存しません。
+          {!PUBLIC_READ_ONLY && "「外す」は現在の所属期間を閉じ、履歴を残します。"}
         </p>
 
         {!PUBLIC_READ_ONLY && <form
@@ -228,7 +181,7 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
           className="border rounded-lg p-4 space-y-3 bg-gray-50"
         >
           <h3 className="font-medium text-sm">銘柄を追加</h3>
-          <div className="grid gap-3 sm:grid-cols-[2fr_1fr] items-end">
+          <div className="grid gap-3 items-end">
             <label className="space-y-1">
               <span className="block text-xs text-gray-600">銘柄</span>
               <select
@@ -245,30 +198,7 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
                 ))}
               </select>
             </label>
-            <label className="space-y-1">
-              <span className="block text-xs text-gray-600">ウェイト</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={newWeight}
-                onChange={(e) => setNewWeight(e.target.value)}
-                className="w-full border rounded px-2 py-1 text-sm"
-              />
-            </label>
           </div>
-          <label className="block space-y-1">
-            <span className="block text-xs text-gray-600">
-              採用理由 — なぜこの銘柄をこのテーマに入れるのか
-            </span>
-            <textarea
-              rows={2}
-              value={newRationale}
-              onChange={(e) => setNewRationale(e.target.value)}
-              className="w-full border rounded px-2 py-1 text-sm"
-              placeholder="後から仮説を検証できるように、判断の根拠を残します"
-            />
-          </label>
           <button
             type="submit"
             disabled={busy || newTargetId === ""}

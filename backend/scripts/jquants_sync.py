@@ -36,7 +36,7 @@ def find_unmapped_jquants_codes(conn: Connection) -> list[str]:
         """
         SELECT a.target_key
         FROM investment_target a
-        WHERE a.is_active = TRUE
+        WHERE a.is_monitored = TRUE
           AND NOT EXISTS (
               SELECT 1
               FROM investment_target_identifier ai

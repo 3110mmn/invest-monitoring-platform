@@ -8,6 +8,22 @@
 スキーマ変更と文書生成の手順は開発ガイドを正本とします。CIは本書のテーブル・列とmigrationの
 不足・余剰を検出します。
 
+現在の定義はAlembic revision `0003_master_schema_boundaries` 適用後を対象とします。
+
+### `0003_master_schema_boundaries`での変更
+
+| 変更前 | 変更後 | 理由・移行規則 |
+|---|---|---|
+| `investment_target.is_active` | `investment_target.is_monitored` | 商品の有効性ではなく、このアプリで監視するかを表す列だったため改名。真偽値はそのまま引き継ぐ |
+| `theme_investment_target`の複合主キー | `membership_id`による所属期間単位の主キー | 同じテーマと銘柄を解除後に再登録でき、過去の所属期間も保持できるようにする |
+| `theme_investment_target.is_active` | `effective_from` / `effective_to` | 有効・無効の現在値ではなく、所属していた期間を事実として保持する |
+| `theme_investment_target.basket_weight` | Masterから削除 | ウェイトは所属の事実ではなく配分判断であるため、将来のDecision領域で管理する |
+| `theme_investment_target.rationale` | Masterから削除 | 採用理由は所属の事実ではなく評価・解釈であるため、将来のAssessment領域で管理する |
+
+旧relationの有効行は`effective_to = NULL`、無効行は旧`updated_at`を`effective_to`として移行します。
+旧`created_at`は`effective_from`と新しい`created_at`へ引き継ぎます。削除したウェイトと採用理由は、
+意味の異なる領域へ機械的に移さず、移行対象外とします。
+
 ## 1. 共通データ規約
 
 | 対象 | 規約 |
@@ -63,7 +79,7 @@
 | 取得基盤 | `ingestion_run` | 1回の取得・ETLジョブ実行 |
 | 取得基盤 | `ingestion_error` | 1実行内の1エラー |
 | 識別子 | `investment_target_identifier` | 1銘柄の1外部識別子と有効期間 |
-| 関連 | `theme_investment_target` | 1テーマと1銘柄の関連 |
+| 関連履歴 | `theme_investment_target` | 1テーマと1銘柄の1所属期間 |
 
 
 ## 4. マスタ
@@ -101,7 +117,7 @@
 | `target_type` | `individual_stock` / `etf` / `mutual_fund` / `reit` / `bond` / `index` / `commodity` |
 | `market` | 市場・取引所 |
 | `currency` | ISO 4217通貨コードを推奨。例: `JPY`, `USD` |
-| `is_active` | 有効フラグ |
+| `is_monitored` | このアプリで現在監視する対象なら `TRUE`。上場状態や商品自体の有効性は表さない |
 | `created_at`, `updated_at` | 作成・更新日時 |
 
 ## 5. データ取得・外部識別子
@@ -174,15 +190,27 @@
 
 ### `theme_investment_target`
 
-主キーは `(theme_id, target_id)` です。
+テーマと銘柄の現在・過去の所属期間を保持します。現在所属している行は`effective_to IS NULL`です。
+同じ組み合わせを外して再追加した場合は、過去行を上書きせず新しい行を追加します。
 
 | 列 | 定義 |
 | --- | --- |
+| `membership_id` | 所属期間を識別する主キー |
 | `theme_id`, `target_id` | テーマと銘柄 |
-| `basket_weight` | テーマ内での参考ウェイト。既定値 `1.0` |
-| `rationale` | 採用根拠 |
-| `is_active` | 有効フラグ |
+| `effective_from` | 所属開始日時 |
+| `effective_to` | 所属終了日時。現在所属中なら `NULL` |
 | `created_at`, `updated_at` | 作成・更新日時 |
+
+`effective_to`は`NULL`、または`effective_from`以後でなければなりません。同じ`theme_id`と
+`target_id`について、`effective_to IS NULL`の現在行は部分一意インデックスにより最大1件です。
+過去行は複数保持できます。
+
+Relationship APIで追加すると、現在行がなければ新しいmembershipを作成します。すでに現在行が
+ある場合は重複行を作りません。解除時は現在行の`effective_to`と`updated_at`を更新し、行自体は
+削除しません。
+
+`basket_weight`と`rationale`はMasterへ保存しません。ウェイトは配分判断、採用理由はAssessmentに
+属するため、Assessment / Decisionのversion・actor・evidence設計が確定した段階で別テーブルへ追加します。
 
 ## 7. 時系列データ
 
@@ -191,7 +219,9 @@
 
 ## 9. 削除・履歴保持方針
 
-- マスタは原則物理削除せず、`is_active = FALSE` にします。
+- 戦略・テーマは原則物理削除せず、`is_active = FALSE`にします。投資対象の監視停止は
+  `investment_target.is_monitored = FALSE`にします。
+- テーマと銘柄の所属解除は物理削除せず、現在行の`effective_to`を設定します。
 - 時系列、取込履歴、財務開示は再現性確保のため履歴を保持します。
 - その他の外部キーには自動削除を設定していません。参照中の親レコード削除は失敗させます。
 - rawデータ本体はDB外に保存し、`ingestion_run.raw_path` から追跡します。

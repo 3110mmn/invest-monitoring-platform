@@ -15,6 +15,18 @@
 > 公開環境には実データを置かず、synthetic dataを別環境に用意しています。実データを扱う環境は
 > 非公開で、データ・認証情報・DBを公開側と共有しません。
 
+### Snapshot update — 2026-09-30
+
+PostgreSQLスキーマをAlembic revision `0003_master_schema_boundaries`へ更新しました。
+
+- 投資対象の状態を`is_active`から、監視対象であることを明示する`is_monitored`へ変更
+- テーマと投資対象の関係を、有効期間を持つmembership履歴として再設計
+- `basket_weight`と`rationale`をMasterから除外し、将来のDecision / Assessment領域と分離
+- Backend API、ETL、Frontend、テスト、データ辞書を新しい境界へ統一
+
+既存の所属関係は期間履歴へ移行し、解除・再登録でも過去のmembershipを上書きしない設計です。
+詳細は[スキーマ・データ定義書](docs/data/schema-data-dictionary.md)を参照してください。
+
 ## ポイント
 
 | 観点 | 実装内容 |
@@ -130,7 +142,8 @@ FastAPIがテーマ、投資対象、価格、財務、取込実行履歴を提�
 | Derived | Observedから再計算できる特徴量・リターン・リスク指標 | 着手（日次リターン。計算定義が正本で結果は保存しない） |
 | Assessment | 閾値・モデルによるバージョン付きの評価 | 未着手 |
 | Decision | 評価を踏まえた意思決定 | 未着手 |
-| Outcome | 約定・保有・損益という事実 | 未着手 |
+| Action | 注文・取消・約定など実際に行った取引 | 未着手 |
+| Outcome | 損益・制約充足・仮説の成否など行動後の結果 | 未着手 |
 
 ### データフロー概要
 

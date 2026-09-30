@@ -59,8 +59,8 @@ export default function InvestmentTargetsPage() {
               <td className="px-3 py-2">{target.market ?? "-"}</td>
               <td className="px-3 py-2">{target.currency ?? "-"}</td>
               <td className="px-3 py-2">
-                <span className={target.is_active ? "badge-ok" : "text-gray-400"}>
-                  {target.is_active ? "Active" : "Inactive"}
+                <span className={target.is_monitored ? "badge-ok" : "text-gray-400"}>
+                  {target.is_monitored ? "監視中" : "監視停止"}
                 </span>
               </td>
             </tr>

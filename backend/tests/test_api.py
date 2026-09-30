@@ -211,6 +211,24 @@ def test_create_investment_target(client):
     )
     assert response.status_code == 201
     assert response.json()["target_key"] == "1306.T"
+    assert response.json()["is_monitored"] is True
+
+
+def test_investment_target_monitoring_state_is_explicit(client):
+    """監視状態は商品の有効性ではなく、`is_monitored`として更新・検索する。"""
+    target_id = client.post(
+        "/api/investment-targets/",
+        json={"target_key": "SPY", "target_name": "S&P 500 ETF", "target_type": "etf"},
+    ).json()["target_id"]
+
+    updated = client.patch(
+        f"/api/investment-targets/{target_id}", json={"is_monitored": False}
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["is_monitored"] is False
+    monitored = client.get("/api/investment-targets/?is_monitored=true").json()
+    assert target_id not in {row["target_id"] for row in monitored}
 
 
 def test_duplicate_target_key_returns_conflict(client):
@@ -268,12 +286,8 @@ def test_price_endpoints_return_nothing_when_the_analytics_layer_is_empty(client
     assert latest.json() == []
 
 
-def test_theme_constituents_include_weight_and_rationale(client, db):
-    """テーマの構成銘柄は、ウェイトと採用理由つきで返る。
-
-    採用理由は投資仮説の記録であり、銘柄マスタ側の属性ではない。
-    テーマ内での位置づけとして別の列名で返す。
-    """
+def test_theme_constituents_include_membership_identity(client, db):
+    """現在の構成銘柄は、所属履歴のIDと開始時点つきで返る。"""
     # strategy は schema.sql が初期投入しているため、既存を参照する
     strategy_id = db.execute(
         "SELECT strategy_id FROM strategy WHERE strategy_key = 'core'"
@@ -287,8 +301,7 @@ def test_theme_constituents_include_weight_and_rationale(client, db):
         "VALUES ('6758.T', 'ソニー', 'individual_stock')"
     ).lastrowid
     db.execute(
-        "INSERT INTO theme_investment_target (theme_id, target_id, basket_weight, rationale) "
-        "VALUES (?, ?, 0.4, '画像センサーの寡占')",
+        "INSERT INTO theme_investment_target (theme_id, target_id) VALUES (?, ?)",
         (theme_id, target_id),
     )
     db.commit()
@@ -297,9 +310,8 @@ def test_theme_constituents_include_weight_and_rationale(client, db):
 
     assert len(body) == 1
     assert body[0]["target_key"] == "6758.T"
-    assert body[0]["basket_weight"] == 0.4
-    assert body[0]["theme_rationale"] == "画像センサーの寡占"
-    assert body[0]["relation_is_active"] is True
+    assert body[0]["membership_id"]
+    assert body[0]["effective_from"]
 
 
 def test_theme_constituents_are_empty_for_theme_without_targets(client, db):
@@ -388,59 +400,88 @@ def _seed_theme_and_target(db):
 
 
 def test_adding_a_constituent_returns_the_created_row(client, db):
-    """銘柄を追加すると、ウェイトと採用理由つきの構成銘柄が返る。"""
+    """銘柄を追加すると、新しい現在所属が返る。"""
     theme_id, target_id = _seed_theme_and_target(db)
 
     res = client.post(
         f"/api/relationships/themes/{theme_id}/investment-targets",
-        json={"target_id": target_id, "basket_weight": 0.3, "rationale": "画像センサー"},
+        json={"target_id": target_id},
     )
 
     assert res.status_code == 201
     assert res.json()["target_key"] == "6758.T"
-    assert res.json()["basket_weight"] == 0.3
-    assert res.json()["theme_rationale"] == "画像センサー"
-    assert res.json()["relation_is_active"] is True
+    assert res.json()["membership_id"]
+    assert res.json()["effective_from"]
 
 
-def test_removing_a_constituent_keeps_the_record(client, db):
-    """テーマから外しても行は消さず、無効な紐付けとして残す。
-
-    いつ何をどういう理由で採用していたかは投資判断の記録であり、
-    物理削除すると後から仮説を検証できなくなる。
-    """
+def test_removing_a_constituent_closes_the_membership(client, db):
+    """テーマから外すと一覧から消えるが、所属履歴はDBに残る。"""
     theme_id, target_id = _seed_theme_and_target(db)
     client.post(
         f"/api/relationships/themes/{theme_id}/investment-targets",
-        json={"target_id": target_id, "basket_weight": 0.3, "rationale": "画像センサー"},
+        json={"target_id": target_id},
     )
 
     res = client.delete(f"/api/relationships/themes/{theme_id}/investment-targets/{target_id}")
 
     assert res.status_code == 204
     rows = client.get(f"/api/relationships/themes/{theme_id}/investment-targets").json()
-    assert len(rows) == 1
-    assert rows[0]["relation_is_active"] is False
-    assert rows[0]["theme_rationale"] == "画像センサー"
+    assert rows == []
+    history = db.execute(
+        "SELECT effective_to FROM theme_investment_target "
+        "WHERE theme_id = ? AND target_id = ?",
+        (theme_id, target_id),
+    ).fetchall()
+    assert len(history) == 1
+    assert history[0]["effective_to"] is not None
 
 
-def test_re_adding_a_removed_constituent_restores_it(client, db):
-    """外した銘柄を再度追加すると有効に戻る。"""
+def test_re_adding_a_removed_constituent_starts_new_membership(client, db):
+    """再追加は過去行を上書きせず、新しい所属期間を開始する。"""
     theme_id, target_id = _seed_theme_and_target(db)
     client.post(
         f"/api/relationships/themes/{theme_id}/investment-targets",
-        json={"target_id": target_id, "basket_weight": 0.3},
+        json={"target_id": target_id},
     )
     client.delete(f"/api/relationships/themes/{theme_id}/investment-targets/{target_id}")
 
     res = client.post(
         f"/api/relationships/themes/{theme_id}/investment-targets",
-        json={"target_id": target_id, "basket_weight": 0.5, "rationale": "再採用"},
+        json={"target_id": target_id},
     )
 
-    assert res.json()["relation_is_active"] is True
-    assert res.json()["basket_weight"] == 0.5
-    assert res.json()["theme_rationale"] == "再採用"
+    assert res.json()["membership_id"]
+    history = db.execute(
+        "SELECT effective_to FROM theme_investment_target "
+        "WHERE theme_id = ? AND target_id = ? ORDER BY effective_from",
+        (theme_id, target_id),
+    ).fetchall()
+    assert len(history) == 2
+    assert history[0]["effective_to"] is not None
+    assert history[1]["effective_to"] is None
+
+
+def test_adding_an_existing_current_membership_is_idempotent(client, db):
+    """同じ現在所属を再送しても履歴行を重複させない。"""
+    theme_id, target_id = _seed_theme_and_target(db)
+
+    first = client.post(
+        f"/api/relationships/themes/{theme_id}/investment-targets",
+        json={"target_id": target_id},
+    )
+    second = client.post(
+        f"/api/relationships/themes/{theme_id}/investment-targets",
+        json={"target_id": target_id},
+    )
+
+    assert second.status_code == 201
+    assert second.json()["membership_id"] == first.json()["membership_id"]
+    count = db.execute(
+        "SELECT COUNT(*) FROM theme_investment_target "
+        "WHERE theme_id = ? AND target_id = ?",
+        (theme_id, target_id),
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_adding_to_unknown_theme_or_target_returns_404(client, db):

@@ -11,11 +11,11 @@ class InvestmentTargetRepository(BaseRepository):
 
     # ---- Read ----
 
-    def find_all(self, is_active: bool | None = None) -> list[dict[str, Any]]:
+    def find_all(self, is_monitored: bool | None = None) -> list[dict[str, Any]]:
         q = "SELECT * FROM investment_target"
-        if is_active is not None:
-            q += " WHERE is_active = ?"
-            return self.execute_query(q, (is_active,))
+        if is_monitored is not None:
+            q += " WHERE is_monitored = ?"
+            return self.execute_query(q, (is_monitored,))
         return self.execute_query(q + " ORDER BY target_id")
 
     def find_by_id(self, target_id: int) -> dict[str, Any] | None:
@@ -23,12 +23,11 @@ class InvestmentTargetRepository(BaseRepository):
 
     def get_theme_investment_targets(self, theme_id: int) -> list[dict[str, Any]]:
         return self.execute_query("""
-            SELECT a.*, ta.basket_weight, ta.rationale AS theme_rationale,
-                   ta.is_active AS relation_is_active
+            SELECT a.*, ta.membership_id, ta.effective_from
             FROM theme_investment_target ta
             JOIN investment_target a ON ta.target_id = a.target_id
-            WHERE ta.theme_id = ?
-            ORDER BY ta.basket_weight DESC, a.target_name
+            WHERE ta.theme_id = ? AND ta.effective_to IS NULL
+            ORDER BY a.target_name
         """, (theme_id,))
 
     # 価格の読み出しは `repositories/price_source.py` が持つ。所在がPostgreSQLとは
@@ -42,7 +41,7 @@ class InvestmentTargetRepository(BaseRepository):
         return self.execute_insert("""
             INSERT INTO investment_target
                 (target_key, target_name, target_type, market, currency,
-                 is_active, created_at, updated_at)
+                 is_monitored, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, TRUE, ?, ?)
         """, "target_id", (
             data["target_key"], data["target_name"], data.get("target_type"),
@@ -51,7 +50,7 @@ class InvestmentTargetRepository(BaseRepository):
         ))
 
     def update(self, target_id: int, data: dict[str, Any]) -> bool:
-        cols = ("target_name", "target_type", "market", "currency", "is_active")
+        cols = ("target_name", "target_type", "market", "currency", "is_monitored")
         sets, params = [], []
         for col in cols:
             if col in data and data[col] is not None:
@@ -68,46 +67,34 @@ class InvestmentTargetRepository(BaseRepository):
 
     # ---- theme_investment_target Write ----
 
-    def upsert_theme_investment_target(self, theme_id: int, target_id: int, data: dict[str, Any]) -> bool:
+    def add_theme_investment_target(self, theme_id: int, target_id: int) -> bool:
+        """現在の所属が無いときだけ、新しい有効期間を開始する。"""
         now = datetime.now(UTC)
         self.execute_write("""
             INSERT INTO theme_investment_target
-                (theme_id, target_id, basket_weight, rationale, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, TRUE, ?, ?)
-            ON CONFLICT(theme_id, target_id) DO UPDATE SET
-                basket_weight = excluded.basket_weight,
-                rationale     = excluded.rationale,
-                is_active     = excluded.is_active,
-                updated_at    = excluded.updated_at
-        """, (
-            theme_id, target_id,
-            data.get("basket_weight", 1.0), data.get("rationale"),
-            now, now,
-        ))
+                (theme_id, target_id, effective_from, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(theme_id, target_id) WHERE effective_to IS NULL DO NOTHING
+        """, (theme_id, target_id, now, now, now))
         return True
 
     def deactivate_theme_investment_target(self, theme_id: int, target_id: int) -> bool:
-        """テーマから銘柄を外す。行は消さず `is_active = FALSE` にする。
-
-        「いつ何を、どういう理由で入れていたか」は投資判断の記録として残す。
-        物理削除すると、後から仮説を検証できなくなる。再度追加すれば復帰する。
-        """
+        """現在の所属期間を閉じる。過去の所属行は上書きしない。"""
         now = datetime.now(UTC)
         self.execute_write(
-            "UPDATE theme_investment_target SET is_active = FALSE, updated_at = ? "
-            "WHERE theme_id = ? AND target_id = ?",
-            (now, theme_id, target_id),
+            "UPDATE theme_investment_target SET effective_to = ?, updated_at = ? "
+            "WHERE theme_id = ? AND target_id = ? AND effective_to IS NULL",
+            (now, now, theme_id, target_id),
         )
         return True
 
     def find_theme_investment_target(
         self, theme_id: int, target_id: int
     ) -> dict[str, Any] | None:
-        """テーマ内の1銘柄を、ウェイトと採用理由つきで返す。"""
+        """テーマ内で現在有効な1銘柄を返す。"""
         return self.execute_single("""
-            SELECT a.*, ta.basket_weight, ta.rationale AS theme_rationale,
-                   ta.is_active AS relation_is_active
+            SELECT a.*, ta.membership_id, ta.effective_from
             FROM theme_investment_target ta
             JOIN investment_target a ON ta.target_id = a.target_id
-            WHERE ta.theme_id = ? AND ta.target_id = ?
+            WHERE ta.theme_id = ? AND ta.target_id = ? AND ta.effective_to IS NULL
         """, (theme_id, target_id))

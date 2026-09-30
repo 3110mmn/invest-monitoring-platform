@@ -129,7 +129,7 @@ def update_investment_target_prices(since: date | None = None) -> None:
         (str(row["target_key"]), str(row["target_name"]))
         for row in conn.execute(
             "SELECT target_key, target_name FROM investment_target "
-            "WHERE is_active = TRUE ORDER BY target_id"
+            "WHERE is_monitored = TRUE ORDER BY target_id"
         ).fetchall()
     ]
     print(f"\n=== 価格取得 ({len(targets)}件) ===\n")

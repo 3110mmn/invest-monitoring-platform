@@ -40,8 +40,11 @@ def _prices() -> ParquetPriceSource:
 
 
 @router.get("/", response_model=list[InvestmentTargetRead])
-def list_investment_targets(is_active: bool | None = None, repo: InvestmentTargetRepository = Depends(_repo)):
-    return repo.find_all(is_active=is_active)
+def list_investment_targets(
+    is_monitored: bool | None = None,
+    repo: InvestmentTargetRepository = Depends(_repo),
+):
+    return repo.find_all(is_monitored=is_monitored)
 
 
 @router.get("/latest-prices", response_model=list[LatestMarketPriceRead])
@@ -49,7 +52,7 @@ def latest_prices(
     repo: InvestmentTargetRepository = Depends(_repo),
     prices: ParquetPriceSource = Depends(_prices),
 ):
-    return prices.latest_prices(repo.find_all(is_active=True))
+    return prices.latest_prices(repo.find_all(is_monitored=True))
 
 
 @router.get("/{target_id}", response_model=InvestmentTargetRead)
@@ -97,4 +100,4 @@ def update_investment_target(
 def delete_investment_target(target_id: int, repo: InvestmentTargetRepository = Depends(_repo)):
     if not repo.find_by_id(target_id):
         raise HTTPException(status_code=404, detail="InvestmentTarget not found")
-    repo.update(target_id, {"is_active": False})
+    repo.update(target_id, {"is_monitored": False})

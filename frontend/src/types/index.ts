@@ -44,19 +44,15 @@ export interface InvestmentTarget {
   target_type: InvestmentTargetType | null;
   market: string | null;
   currency: string | null;
-  is_active: boolean;
+  is_monitored: boolean;
   created_at: string;
   updated_at: string;
 }
 
-/**
- * テーマの構成銘柄。銘柄そのものの属性に、テーマ内での位置づけを添えたもの。
- * `theme_rationale` はそのテーマにこの銘柄を含めた理由で、投資仮説の記録にあたる。
- */
+/** 現在テーマに所属している構成銘柄。 */
 export interface ThemeConstituent extends InvestmentTarget {
-  basket_weight: number | null;
-  theme_rationale: string | null;
-  relation_is_active: boolean;
+  membership_id: number;
+  effective_from: string;
 }
 
 export interface Strategy {

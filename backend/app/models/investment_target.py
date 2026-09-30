@@ -24,12 +24,12 @@ class InvestmentTargetUpdate(BaseModel):
     target_type: InvestmentTargetType | None = None
     market: str | None = None
     currency: str | None = None
-    is_active: bool | None = None
+    is_monitored: bool | None = None
 
 
 class InvestmentTargetRead(InvestmentTargetBase):
     target_id: int
-    is_active: bool
+    is_monitored: bool
     created_at: datetime
     updated_at: datetime
 

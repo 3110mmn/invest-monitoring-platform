@@ -30,7 +30,7 @@ def list_theme_investment_targets(
     theme_id: int,
     repo: InvestmentTargetRepository = Depends(_investment_target_repo),
 ):
-    """テーマの構成銘柄を、テーマ内でのウェイトと採用理由つきで返す。"""
+    """テーマに現在所属している構成銘柄を返す。"""
     return repo.get_theme_investment_targets(theme_id)
 
 
@@ -39,20 +39,17 @@ def list_theme_investment_targets(
     response_model=ThemeConstituentRead,
     status_code=201,
 )
-def upsert_theme_investment_target(
+def add_theme_investment_target(
     theme_id: int,
     body: ThemeInvestmentTargetCreate,
     conn: Connection = Depends(get_db),
     repo: InvestmentTargetRepository = Depends(_investment_target_repo),
 ):
-    """テーマに銘柄を追加、または既存の紐付けを更新する。
-
-    外した銘柄を再度追加すると、`is_active` が戻って復帰する。
-    """
+    """テーマへの所属期間を開始する。既に所属中なら冪等に現在行を返す。"""
     _require_theme(conn, theme_id)
     if not repo.find_by_id(body.target_id):
         raise HTTPException(status_code=404, detail="InvestmentTarget not found")
-    repo.upsert_theme_investment_target(theme_id, body.target_id, body.model_dump())
+    repo.add_theme_investment_target(theme_id, body.target_id)
     return repo.find_theme_investment_target(theme_id, body.target_id)
 
 

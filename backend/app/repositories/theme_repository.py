@@ -54,7 +54,8 @@ class ThemeRepository(BaseRepository):
                 t.is_active
             FROM theme t
             JOIN strategy s ON s.strategy_id = t.strategy_id
-            LEFT JOIN theme_investment_target ta ON t.theme_id = ta.theme_id AND ta.is_active = TRUE
+            LEFT JOIN theme_investment_target ta
+              ON t.theme_id = ta.theme_id AND ta.effective_to IS NULL
             WHERE t.is_active = TRUE
             GROUP BY t.theme_id, s.strategy_id, s.strategy_key, s.strategy_name
             ORDER BY s.strategy_key, t.theme_name

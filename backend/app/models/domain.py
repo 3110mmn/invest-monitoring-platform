@@ -45,13 +45,13 @@ class InvestmentTarget:
     target_type: str | None = None
     market: str | None = None
     currency: str | None = None
-    is_active: bool = True
+    is_monitored: bool = True
 
 
 @dataclass
 class ThemeInvestmentTarget:
+    membership_id: int
     theme_id: int
     target_id: int
-    basket_weight: float = 1.0
-    rationale: str | None = None
-    is_active: bool = True
+    effective_from: str
+    effective_to: str | None = None

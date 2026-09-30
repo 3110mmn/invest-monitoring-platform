@@ -369,6 +369,16 @@ def _migration_sql(path: Path) -> str:
 DROP_TABLE = re.compile(
     r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z0-9_]+)", re.IGNORECASE
 )
+RENAME_TABLE = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z0-9_]+)[\"`]?\s+RENAME\s+TO\s+"
+    r"[\"`]?([A-Za-z0-9_]+)",
+    re.IGNORECASE,
+)
+RENAME_COLUMN = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z0-9_]+)[\"`]?\s+RENAME\s+COLUMN\s+"
+    r"[\"`]?([A-Za-z0-9_]+)[\"`]?\s+TO\s+[\"`]?([A-Za-z0-9_]+)",
+    re.IGNORECASE,
+)
 
 
 def parse_schema(schema_path: Path | str | list[Path] = DEFAULT_SCHEMA_PATH) -> Schema:
@@ -399,4 +409,33 @@ def parse_schema(schema_path: Path | str | list[Path] = DEFAULT_SCHEMA_PATH) -> 
                     dropped = match.group(1)
                     tables = [t for t in tables if t.name != dropped]
                     indexes = [i for i in indexes if i.table != dropped]
+            elif upper.startswith("ALTER TABLE"):
+                column_match = RENAME_COLUMN.match(statement)
+                if column_match:
+                    table_name, old_name, new_name = column_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    if table is not None:
+                        column = table.column(old_name)
+                        if column is not None:
+                            column.name = new_name
+                        table.primary_key = [new_name if c == old_name else c for c in table.primary_key]
+                        table.uniques = [
+                            [new_name if c == old_name else c for c in unique]
+                            for unique in table.uniques
+                        ]
+                        for index in indexes:
+                            if index.table == table_name:
+                                index.columns = [
+                                    new_name if c == old_name else c for c in index.columns
+                                ]
+                    continue
+                table_match = RENAME_TABLE.match(statement)
+                if table_match:
+                    old_name, new_name = table_match.groups()
+                    table = next((item for item in tables if item.name == old_name), None)
+                    if table is not None:
+                        table.name = new_name
+                    for index in indexes:
+                        if index.table == old_name:
+                            index.table = new_name
     return Schema(tables=tables, indexes=indexes)

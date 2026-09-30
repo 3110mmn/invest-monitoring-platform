@@ -18,7 +18,7 @@
 | `ingestion_run` | 16 | `ingestion_run_id` |
 | `ingestion_error` | 9 | `error_id` |
 | `investment_target_identifier` | 10 | `investment_target_identifier_id` |
-| `theme_investment_target` | 7 | `theme_id`, `target_id` |
+| `theme_investment_target` | 7 | `membership_id` |
 
 ## テーブル定義
 
@@ -62,7 +62,7 @@
 | `target_type` | TEXT | YES | - | `individual_stock`, `etf`, `mutual_fund`, `reit`, `bond`, `index`, `commodity` |
 | `market` | TEXT | YES | - | - |
 | `currency` | TEXT | YES | - | - |
-| `is_active` | BOOLEAN | NO | `TRUE` | - |
+| `is_monitored` | BOOLEAN | NO | `TRUE` | - |
 | `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
 | `updated_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
 
@@ -153,14 +153,17 @@
 
 | 列 | 型 | NULL | 既定値 | 列挙値 |
 |---|---|---|---|---|
+| `membership_id` | BIGINT | NO | `AS` | - |
 | `theme_id` | BIGINT | NO | - | - |
 | `target_id` | BIGINT | NO | - | - |
-| `basket_weight` | DOUBLE PRECISION | YES | `1.0` | - |
-| `rationale` | TEXT | YES | - | - |
-| `is_active` | BOOLEAN | NO | `TRUE` | - |
+| `effective_from` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+| `effective_to` | TIMESTAMPTZ | YES | - | - |
 | `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
 | `updated_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
 
-- 主キー: `theme_id`, `target_id`
+- 主キー: `membership_id`
 - 外部キー: `theme_id` → `theme`(`theme_id`)
 - 外部キー: `target_id` → `investment_target`(`target_id`)
+- テーブルCHECK: `effective_to IS NULL OR effective_to >= effective_from`
+- 一意インデックス `uq_theme_target_current_membership`: `theme_id`, `target_id` WHERE `effective_to IS NULL`
+- インデックス `idx_theme_target_membership_history`: `theme_id`, `target_id`, `effective_from`

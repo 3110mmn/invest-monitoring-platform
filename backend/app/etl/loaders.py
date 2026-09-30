@@ -77,7 +77,7 @@ def active_jquants_codes(conn: Connection) -> list[str]:
             WHERE ds.source_key = 'jquants'
               AND ai.identifier_type = 'jpx_code'
               AND ai.is_primary = TRUE
-              AND a.is_active = TRUE
+              AND a.is_monitored = TRUE
               AND ai.valid_from <= CURRENT_DATE
               AND (ai.valid_to IS NULL OR ai.valid_to >= CURRENT_DATE)
             ORDER BY ai.identifier

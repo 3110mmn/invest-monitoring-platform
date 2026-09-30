@@ -38,7 +38,8 @@
 3. **Derived** — Observedから再計算可能な特徴量、リターン、リスク指標、ファクター
 4. **Assessment** — 閾値・モデル・ルールによるバージョン付きの評価・解釈
 5. **Decision** — Assessmentを踏まえた人またはシステムの意思決定
-6. **Outcome** — 注文、約定、入出金、手数料など実際に発生した取引事実
+6. **Action** — 発注、取消、約定、入出金、手数料など実際に実行した行為
+7. **Outcome** — リターン、制約充足、仮説の成否などAction後に観測された結果
 
 外部提供者が加工した値でも、この基盤が外部入力として取得したものはObservedとします。
 自基盤内で生成した値だけをDerivedとします。
@@ -153,7 +154,8 @@ PostgreSQLの取込メタデータへ記録します。
 | Derived | `backend/analytics/derived/*.sql`。計算定義が正本で、結果は保存せず都度計算する |
 | Assessment | 未実装。独立した評価領域として追加 |
 | Decision | 未実装。Assessmentとは分離して追加 |
-| Outcome | 未実装。注文・約定等のFactとして追加 |
+| Action | 未実装。注文・取消・約定等の実行Factとして追加 |
+| Outcome | 未実装。Action後の損益・制約充足・仮説の成否として追加 |
 
 関連指標、閾値、状態、構造判定、テーマとの意味的な関係は現在の物理スキーマに持たせません。
 必要になった場合も、関連指標のObservedと、判断の定義・結果・Evidenceを別の責務として設計します。
@@ -175,10 +177,11 @@ AssessmentとDecisionは唯一の正解を表すFactではありません。同�
 - Assessmentと、最終的な採用・却下・上書きであるDecisionを分離する
 - FastAPIのRouterへ判定ロジックを持たせず、PipelineまたはServiceへ委譲する
 
-Outcomeは判断領域から分離します。注文、約定、数量、価格、入出金、手数料は実際に発生した
-取引Factとして、Observedと同様に堅牢な履歴として扱います。保有は約定から導出する状態または
-スナップショット、実現・未実現損益は計算方式に依存するDerivedとして分離します。
-AssessmentがBUYでもDecisionがHOLDになる場合があるため、Assessment、Decision、Outcomeの
+ActionとOutcomeは判断領域から分離します。注文、取消、約定、数量、価格、入出金、手数料は
+実際に行ったAction Factとして、Observedと同様に堅牢な履歴として扱います。保有は約定から
+導出する状態またはスナップショット、実現・未実現損益は計算方式に依存するDerived、仮説の
+成否や制約充足はAction後のOutcomeとして分離します。
+AssessmentがBUYでもDecisionがHOLDになる場合があるため、Assessment、Decision、Action、Outcomeの
 差分も分析可能にします。
 
 ```text
@@ -188,8 +191,10 @@ Assessment Pipeline
         ↓ バージョン付き評価とEvidence
 Decision Layer
         ↓ 採用・却下・上書き
+Action
+        ↓ 注文・約定という実行Fact
 Outcome
-        ↓ 約定・損益というFact
+        ↓ 損益・制約充足・仮説の成否
 分析基盤へ還流
 ```
 
@@ -204,7 +209,7 @@ Outcome
 | `assessment_result` | テーマまたは投資対象に対するスコア、ラベル、確信度、説明 |
 | `assessment_evidence` | 結果に利用したFact、特徴量、値への参照 |
 | `decision` | 評価を踏まえた行動、決定者、理由、採否 |
-| `order` / `execution` | 発注・約定というOutcome Fact |
+| `order` / `execution` | 発注・約定というAction Fact |
 
 これらの物理テーブルと判断Serviceは先行実装しません。要件確定後はAssessment Pipelineが結果を
 永続化し、APIは保存済みの最新結果と履歴を読み取る構成を目標とします。
@@ -229,7 +234,7 @@ Outcome
 - Event factと対象への影響
 - リターン、ボラティリティ、β等のDerivedデータ
 - Factor master、model、value、target exposure
-- Assessment、signal、decision、outcomeの履歴
+- Assessment、signal、Decision、Action、Outcomeの履歴
 - 投資信託・REIT・債券・商品へのデータ取得拡張
 
 `theme`は投資仮説・分類、`investment_target`は価格を持つ投資可能商品として分離し、

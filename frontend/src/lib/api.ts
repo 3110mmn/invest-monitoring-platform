@@ -85,8 +85,10 @@ export const deleteTheme = (id: number) =>
   request<void>(`/themes/${id}`, { method: "DELETE" });
 
 // ---- Investment Targets ----
-export const getInvestmentTargets = (isActive?: boolean) =>
-  request<InvestmentTarget[]>(`/investment-targets/${isActive != null ? `?is_active=${isActive}` : ""}`);
+export const getInvestmentTargets = (isMonitored?: boolean) =>
+  request<InvestmentTarget[]>(
+    `/investment-targets/${isMonitored != null ? `?is_monitored=${isMonitored}` : ""}`,
+  );
 
 export const getInvestmentTarget = (id: number) => request<InvestmentTarget>(`/investment-targets/${id}`);
 
@@ -117,17 +119,17 @@ export const updateInvestmentTarget = (id: number, data: Partial<InvestmentTarge
 export const getThemeInvestmentTargets = (themeId: number) =>
   request<ThemeConstituent[]>(`/relationships/themes/${themeId}/investment-targets`);
 
-/** テーマに銘柄を追加、または既存の紐付けを更新する。外した銘柄を渡すと復帰する。 */
-export const upsertThemeInvestmentTarget = (
+/** テーマへの現在の所属を開始する。 */
+export const addThemeInvestmentTarget = (
   themeId: number,
-  body: { target_id: number; basket_weight?: number; rationale?: string | null },
+  body: { target_id: number },
 ) =>
   request<ThemeConstituent>(`/relationships/themes/${themeId}/investment-targets`, {
     method: "POST",
     body: JSON.stringify(body),
   });
 
-/** テーマから銘柄を外す。行は消えず、無効な紐付けとして記録が残る。 */
+/** テーマから銘柄を外す。現在の所属期間を閉じ、履歴行は残す。 */
 export const removeThemeInvestmentTarget = (themeId: number, targetId: number) =>
   request<void>(`/relationships/themes/${themeId}/investment-targets/${targetId}`, {
     method: "DELETE",
