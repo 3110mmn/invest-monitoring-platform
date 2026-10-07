@@ -32,7 +32,7 @@ known-first-party = ["app", "db", "scripts"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["backend"]
+packages = ["app", "db", "scripts", "analytics"]
 exclude = "(venv|__pycache__)"
 ignore_missing_imports = true
 # app / db / scripts は backend 直下を起点とした名前空間パッケージとして解決する。

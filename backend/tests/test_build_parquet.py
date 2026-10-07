@@ -20,6 +20,9 @@ from scripts.build_parquet import (
 def _price(code: str, day: str) -> dict:
     return {
         "Date": day, "Code": code,
+        "O": 101.0, "H": 111.0, "L": 91.0, "C": 106.0,
+        "Vo": 900.0, "Va": 95000.0, "AdjFactor": 1.0,
+        "MktCap": 123456.0, "ExRT": "1", "UL": "1", "LL": "0",
         "AdjO": 100.0, "AdjH": 110.0, "AdjL": 90.0, "AdjC": 105.0, "AdjVo": 1000.0,
     }
 
@@ -73,6 +76,33 @@ def test_price_basis_is_recorded_as_adjusted():
     rows, _, _ = build_price_rows([_price("72030", "2026-07-01")], run_id=1)
 
     assert rows[0]["price_basis"] == "adjusted"
+
+
+def test_standard_daily_fields_are_kept_in_the_observed_lake():
+    """rawから再構築せずに流動性・時価総額・権利落ちを分析できるようにする。"""
+    rows, _, _ = build_price_rows([_price("72030", "2026-07-01")], run_id=1)
+
+    row = rows[0]
+    assert row["raw_open_price"] == pytest.approx(101.0)
+    assert row["raw_high_price"] == pytest.approx(111.0)
+    assert row["raw_low_price"] == pytest.approx(91.0)
+    assert row["raw_close_price"] == pytest.approx(106.0)
+    assert row["raw_volume"] == pytest.approx(900.0)
+    assert row["turnover_value"] == pytest.approx(95000.0)
+    assert row["adjustment_factor"] == pytest.approx(1.0)
+    assert row["market_cap_million_yen"] == pytest.approx(123456.0)
+    assert row["ex_rights_type"] == "1"
+    assert row["upper_limit_flag"] is True
+    assert row["lower_limit_flag"] is False
+
+
+def test_unknown_limit_flag_rejects_the_record():
+    record = {**_price("72030", "2026-07-01"), "UL": "unknown"}
+
+    rows, skipped, _ = build_price_rows([record], run_id=1)
+
+    assert rows == []
+    assert skipped == 1
 
 
 def test_partitions_are_written_per_year(tmp_path):

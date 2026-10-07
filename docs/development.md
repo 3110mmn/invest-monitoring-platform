@@ -45,196 +45,18 @@ npm run dev
 
 フロントエンドは読み取り専用モードでないため、テーマ・銘柄・構成銘柄の編集UIがそのまま使えます。
 
-### 接続先を選ぶ
-
-`backend/.env`の`DATABASE_URL`で決まります。接続URLは`provision_roles.py`が生成した
-`backend/.env.neon`（Git管理外）にあります。
-
-| 用途 | 使うURL | ロール |
-|---|---|---|
-| 開発DB | `postgresql://invest:invest@localhost:5432/invest` | 開発用 |
-| 実データを編集 | `DATABASE_WRITER_URL` | `app_writer` |
-| migration・復旧 | `DATABASE_OWNER_URL` | Owner |
-
-**実データDBへ繋ぐときも`app_writer`を使い、Owner接続はAlembicと復旧のときだけにします。**
-`app_writer`ではCRUDはできてもスキーマは変更できず、`CREATE TABLE`・`DROP TABLE`・`TRUNCATE`は
-すべて`permission denied`で止まります。
-
-一時的に切り替えるだけなら環境変数でも渡せます。
-
-```bash
-cd backend
-DATABASE_URL="postgresql://invest:invest@localhost:5432/invest" \
-  ../venv/bin/uvicorn app.main:app --reload
-```
-
-どちらに繋いでいるかは**画面上部のバナー**が常時表示します。実データDBのときだけ赤く警告します。
-
-- Backend: http://localhost:8000
-- Frontend: http://localhost:3000
-- API Docs: http://localhost:8000/docs
-
-### データ投入
-
-```bash
-cd backend
-python scripts/daily_update.py            # 直近の価格をrawへ（yfinance）
-```
-
-**価格も財務もPostgreSQLへは入りません。** 取得はrawで止め、そこからParquetを
-組み立てます。過去分の一括取得は下の `archive-prices --all` / `archive-financials --all`
-を使います。
-
-> 日次更新は GitHub Actions で毎日 UTC 21:00（JST 06:00）に自動実行されます。
-
-### 全銘柄の価格をアーカイブする
-
-分析用に市場全体の四本値を蓄積します。**rawへ保存するだけで、PostgreSQLへはロードしません。**
-PostgreSQLは監視対象を管理する役割で、全市場の履歴は分析側の責務だからです。
-
-```bash
-cd backend
-python scripts/jquants_sync.py archive-prices --date 2026-07-01     # 単日
-python scripts/jquants_sync.py archive-prices --all                 # プランが提供する全期間
-python scripts/jquants_sync.py archive-prices --catch-up            # 前回の続きから（日次用）
-
-python scripts/jquants_sync.py archive-financials --all             # 財務も同じ形
-python scripts/jquants_sync.py archive-financials --catch-up
-```
-
-価格と財務で日付の決め方は共通です。片方だけ窓の扱いが違うと取りこぼしの原因になります。
-
-**手元で実行したら raw を公開してください。** rawは原本で、Parquetはそこから作り直します。
-
-```bash
-python scripts/publish_raw.py     # RAW_DATA_URI が要る
-```
-
-公開先が未設定のまま取得すると警告が出ます。一度これを見落とし、2年分の財務バックフィル
-487ファイルが1台のマシンにしか無い状態が数日続きました。
-
-日次ワークフローは `--catch-up` を使います。「取得可能な最新日だけ」を取ると、実行が失敗した
-日が穴として残ります。**前回アーカイブ済みの翌日から追いつく**ことで、次回実行で自動的に
-埋まります。一度に取りすぎないよう `--max-days`（既定30）で上限を設けています。
-
-取得単位は日付で、**1リクエストで全銘柄（約4,400件）**が返ります。銘柄単位で回すと
-リクエスト数が銘柄数に比例しますが、日付単位なら日数にしか比例しません。
-
-契約プランの提供期間外は指定しても拒否されるため、期間は窓へ自動で丸めます。
-Freeプランは直近12週を提供しないので、アーカイブは常にその分だけ遅れます。
-
-### 分析用Parquetを組み立てる
-
-rawから分析層のParquetを作ります。**rawが原本でParquetは派生**なので、いつでも作り直せます。
-
-```bash
-cd backend
-python scripts/build_parquet.py --out ../data/parquet                      # 価格
-python scripts/build_financial_parquet.py --out ../data/parquet            # 財務
-python scripts/build_parquet.py --out ../data/parquet --publish gs://<bucket>/lake
-python scripts/reconcile_parquet.py --parquet ../data/parquet
-```
-
-財務は価格と違い、同じ銘柄・同じ期に複数の開示があります（訂正、予想修正）。**開示番号が
-別なら別レコードとして残し**、どれが最新かは利用側が決めます。同じ開示日を複数回
-アーカイブしたぶんだけを畳みます。
-
-rawの所在は`ingestion_run.raw_path`から引きます。GCSへ公開済みでも手元に実体があれば
-そちらを読むため、再構築は数十秒で済みます。手元に無ければGCSから読むので、CIでも動きます。
-
-#### 日次は差分更新にする
-
-```bash
-python scripts/build_parquet.py --base gs://<bucket>/lake --publish gs://<bucket>/lake
-python scripts/build_financial_parquet.py --base gs://<bucket>/lake --publish gs://<bucket>/lake
-```
-
-`--base` は公開済みParquetを土台にし、その`ingestion_run_id`より後のrawだけを読みます。
-**全再構築はCIでは使えません。** 2年分のrawは価格490・財務487ファイルあり、使い捨ての
-ランナーにはローカルキャッシュが無いため、GCSから1つずつ読むと30分を超えます。
-差分なら価格76秒・財務8秒です。
-
-基準線に`ingestion_run_id`を使うのは、単調増加で、rawとParquetの両方に入っているためです。
-日付を基準にすると、遡って取り込んだ過去分を取りこぼします。
-
-新しいrawが無い日（休場日など）は何もせず終わります。失敗ではありません。
-差分と全再構築の結果が一致することは実測で確認しています（215万行、双方向の差分0件）。
-
-`reconcile_parquet.py` は構造の検査（重複キー、OHLCの大小関係、負値）で異常終了します。
-**PostgreSQLとの比較はもうありません。** 移行時の突合で終値の乖離が中央値0.00%だったことを
-確認したうえで、観測テーブルを廃止しました。
-
-### Derivedを計算する
-
-`backend/analytics/derived/*.sql` が計算定義で、**この定義が正本です。** 結果は保存せず
-都度計算します。materializeするのは、高コスト・複数用途で共有・過去に提示した判断の
-Evidence、のいずれかが成立したときだけです。
-
-現在の`daily_return`と銘柄詳細画面の累積値は、調整済み終値を使った**価格リターン**です。
-株式分割・併合等による機械的な価格変動は補正しますが、現金配当は含みません。
-配当再投資込みのTotal Returnは、配当Observedを導入する将来フェーズで別指標として実装します。
-
-```bash
-cd backend
-python scripts/derived.py                                  # 定義の一覧
-python scripts/derived.py daily_return --target 7203.T     # 計算して表示
-```
-
-DuckDBはin-memoryで使い、`.duckdb`ファイルを作りません。データはParquetにあり、DuckDBは
-計算エンジンです。ファイルを作ると、それが第2の正本に見えてしまいます。
-
-#### 中身をブラウザで見る
-
-```bash
-cd backend
-python scripts/explore.py --lake gs://<bucket>/lake   # 日次で更新されている方
-python scripts/explore.py                             # 手元の data/parquet
-python scripts/explore.py --lake ../data/demo-parquet
-```
-
-**主な用途は、GCS上のlakeが日次で更新されているかの確認です。** そのため既定の所在は
-`PARQUET_LAKE`（APIが読むのと同じ設定）で、手元のコピーではありません。
-`data/parquet` は組み立てたときのまま止まる静的なコピーなので、既定にすると
-「更新されていない」と読み違えます。
-
-起動時に各取得元の最新日、財務の最新開示日、組み立て時刻を表示し、2日以上古ければ
-警告します。
-
-DuckDB同梱のUI拡張をローカルで起動します。追加のインストールは要りません。
-同時に複数開くときは `--port` を指定します。
-APIが読むのと**同じview**（`preferred_price` / `financial_disclosure`）を張った状態で
-開くので、採用する観測の選び方まで含めて画面の値と同じものを確認できます。素の
-Parquetを見たい場合は `raw_market_price` / `raw_financial_summary` を使います。
-
-#### GCS上のParquetを直接読む
-
-`--parquet-glob` に `gs://` を渡すと、手元にコピーせずGCSのまま計算します。
-
-```bash
-gcloud auth application-default login   # 初回のみ。gcloud auth login とは別物
-python scripts/derived.py daily_return \
-  --parquet-glob 'gs://<bucket>/lake/observed/market_price/**/*.parquet'
-```
-
-DuckDB本体のhttpfsはGCSをS3互換として扱うためHMACキーを要求しますが、`runner.connect()` は
-fsspec経由でgcsfsへ委譲するので、**鍵の発行は不要**でADCがそのまま効きます。Cloud Runでは
-メタデータサーバから資格情報を取るため、この初回ログインも要りません。
-
-日次ワークフローは価格の更新に加えて、プランで取得できる最新の開示日の財務サマリーを取り込みます。
-財務の取得に失敗しても価格の更新と公開は止めません。初回投入や銘柄を追加したときは、
-銘柄単位で全開示を取得するオプションつきで手動実行します。
-
-**日次ETLのワークフロー定義はこのリポジトリに含めていません。** 実行ログに銘柄名と終値が
-出るため、非公開のリポジトリで実行しています。ETLの実装自体は `backend/app/etl/` と
-`backend/scripts/` にあり、上記のコマンドから手元でも実行できます。
-
 ### 環境変数 (`backend/.env`)
 
 | 変数名 | 説明 | デフォルト |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL接続URL。Secretとして管理する | `postgresql://invest:invest@localhost:5432/invest` |
-| `LEGACY_SQLITE_PATH` | 一度限りのSQLite移行元 | `data/invest.db` |
-| `DATABASE_READ_ONLY` | PostgreSQLセッションとHTTP APIの書き込みを無効化する。公開環境では `true` | `false` |
+| `DATABASE_READ_ONLY` | PostgreSQLセッションとHTTP APIの書き込みを無効化する。通常の公開APIは `true`。期限付きの公開デモ投資枠書き込みを有効にする場合のみ `false` とし、`PUBLIC_DEMO_WRITE_ENABLED=true` およびデモ専用DBロールを併用する | `false` |
+| `DATABASE_ENVIRONMENT_OVERRIDE` | DB環境表示を明示する。公開デモでは `demo` | URLから自動判定 |
+| `PUBLIC_DEMO_WRITE_ENABLED` | 専用demo DB上で、期限付き投資枠の限定書き込みを許可する | `false` |
+| `PUBLIC_DEMO_MANDATE_TTL_HOURS` | 公開デモで作成した投資枠を有効にする時間数 | `1` |
+| `PUBLIC_DEMO_MAX_ACTIVE_MANDATES` | 公開デモ内で同時に保持する一時投資枠数の上限 | `20` |
+| `PUBLIC_DEMO_MAX_ASSIGNMENTS_PER_MANDATE` | 一時投資枠ごとの投資対象割当数の上限 | `20` |
+| `PUBLIC_DEMO_WRITES_PER_MINUTE` | 公開デモ書き込みのプロセス内レート制限（回/分・送信元単位） | `20` |
 | `BACKFILL_YEARS` | バックフィル期間（年数） | `5` |
 | `CORS_ORIGINS` | 許可するオリジン | `["http://localhost:3000"]` |
 | `JQUANTS_API_KEY` | J-Quants V2 APIキー | 未設定 |
@@ -262,50 +84,9 @@ curl http://localhost:8000/ready
 
 ローカルコンテナは`host.docker.internal`経由でComposeのPostgreSQLへ接続します。
 
-## ローカルDBと旧SQLite移行
+## ローカルDB
 
 ローカル開発DBはDocker ComposeのPostgreSQLです。本番・公開デモとは自動同期しません。
-
-旧SQLiteの既存データを移すのは初回だけです。`db-import` は移行先を置換するため、事前に対象URLを
-確認してください。
-
-```bash
-make db-import
-```
-
-## 公開デモのデータを作る
-
-`seed_demo.py` がsyntheticデータを生成します。実データは1件も置きません。J-Quants APIは
-取得データの第三者提供を禁じているためです。
-
-出力先は2つに分かれます。**どちらも本番と同じ経路で読まれます。**
-
-| 出力先 | 内容 |
-|---|---|
-| デモPostgreSQL | 戦略・テーマ・監視対象・構成・取込の来歴（Control Plane） |
-| デモGCS Parquet | 価格・財務（Data Plane） |
-
-```bash
-read -rs 'DEMO_URL?demo DB URL: '       # 入力は履歴に残らない
-python backend/scripts/seed_demo.py \
-  --database-url "$DEMO_URL" --replace \
-  --publish gs://invest-demo-lake/lake
-unset DEMO_URL
-```
-
-接続先はownerロールが必要です。migrationとTRUNCATEを行うため、`app_reader`では実行できません。
-投入先のDB名は許可リストと照合し、一致しなければ**migrationより前に**中断します。
-この確認は`--force`でも越えられません。
-
-**`--replace`と`--publish`はセットで実行します。** Parquetの各行は`ingestion_run_id`で
-デモPostgreSQLの`ingestion_run`を指しています。PostgreSQLだけ作り直すとidがずれ、
-来歴の参照が古い行を指します。
-
-公開先は`gs://invest-demo-lake`配下に限ります。実データのlakeへ書こうとすると拒否します。
-公開APIのサービスアカウントは実データのバケットに権限を持たないので、読む側も構造的に
-分離されています。
-
----
 
 ## CI と手元での検証
 
@@ -356,3 +137,11 @@ python scripts/generate_schema_docs.py --check   # 生成物とデータ定義�
 http://localhost:8000/docs から確認できます。
 
 ---
+
+## データ取得と分析層の操作
+
+J-Quantsからのアーカイブ、Parquetの組み立て、Derivedの計算、公開デモのデータ生成は、
+認証情報とクラウド権限を必要とする運用手順です。手順は非公開の運用メモで管理します。
+
+設計上の理由は[アーキテクチャ](architecture.md)と[データ層の論理設計](data/design-principles.md)に
+あります。

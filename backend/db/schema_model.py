@@ -1,8 +1,7 @@
-"""SQLまたはAlembic初期migrationから構造モデルを組み立てるモジュール。
+"""Alembic migrationから構造モデルを組み立てるモジュール。
 
 ドキュメント生成と整合性検査の双方がこのモジュールを唯一の入力とする。
-SQLiteの完全なパーサではなく、本プロジェクトの schema.sql が従う記法
-（CREATE TABLE / CREATE INDEX / INSERT）に限定した実装である。
+SQLの完全なパーサではなく、本プロジェクトのmigrationが使う記法に限定する。
 """
 
 from __future__ import annotations
@@ -11,8 +10,6 @@ import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-
-DEFAULT_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 _COLUMN_CONSTRAINT_KEYWORDS = (
     "PRIMARY KEY",
@@ -84,7 +81,7 @@ class Index:
 
 @dataclass
 class Schema:
-    """schema.sql 全体。"""
+    """migration内のSQL全体。"""
 
     tables: list[Table]
     indexes: list[Index]
@@ -104,7 +101,7 @@ class Schema:
 
 
 def _strip_comments(sql: str) -> str:
-    """行コメントを除去する。schema.sql はブロックコメントを使わない。"""
+    """行コメントを除去する。migrationはブロックコメントを使わない。"""
     return "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
 
 
@@ -190,9 +187,13 @@ def _parse_check_values(definition: str) -> list[str]:
 def _parse_column(definition: str) -> Column:
     tokens = definition.split()
     name = tokens[0].strip('"').strip("`")
-    type_name = tokens[1].upper() if len(tokens) > 1 else ""
-    if type_name == "DOUBLE" and len(tokens) > 2 and tokens[2].upper() == "PRECISION":
-        type_name = "DOUBLE PRECISION"
+    type_match = re.match(
+        r'^\s*["`]?[A-Za-z_][A-Za-z0-9_]*["`]?\s+(.+?)'
+        r"(?=\s+(?:NOT\s+NULL|NULL|DEFAULT|PRIMARY\s+KEY|REFERENCES|UNIQUE|CHECK|GENERATED)\b|$)",
+        definition,
+        re.IGNORECASE | re.DOTALL,
+    )
+    type_name = " ".join(type_match.group(1).upper().split()) if type_match else ""
     upper = definition.upper()
 
     default = None
@@ -379,9 +380,38 @@ RENAME_COLUMN = re.compile(
     r"[\"`]?([A-Za-z0-9_]+)[\"`]?\s+TO\s+[\"`]?([A-Za-z0-9_]+)",
     re.IGNORECASE,
 )
+ADD_COLUMN = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+ADD\s+COLUMN\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+DROP_COLUMN = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+ADD_CHECK_CONSTRAINT = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"ADD\s+CONSTRAINT\s+[A-Za-z_][A-Za-z0-9_]*\s+CHECK\s*\(",
+    re.IGNORECASE | re.DOTALL,
+)
+SET_COLUMN_DEFAULT = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"ALTER\s+COLUMN\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+SET\s+DEFAULT\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+DROP_CONSTRAINT = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+ADD_FOREIGN_KEY_CONSTRAINT = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"ADD\s+CONSTRAINT\s+[A-Za-z_][A-Za-z0-9_]*\s+FOREIGN\s+KEY\s*\(",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
-def parse_schema(schema_path: Path | str | list[Path] = DEFAULT_SCHEMA_PATH) -> Schema:
+def parse_schema(schema_path: Path | str | list[Path]) -> Schema:
     """SQL定義を読み込み、テーブルとインデックスの構造モデルを返す。
 
     複数のmigrationを渡すと、順に適用した結果を返す。後のmigrationが落としたテーブルは
@@ -410,6 +440,106 @@ def parse_schema(schema_path: Path | str | list[Path] = DEFAULT_SCHEMA_PATH) -> 
                     tables = [t for t in tables if t.name != dropped]
                     indexes = [i for i in indexes if i.table != dropped]
             elif upper.startswith("ALTER TABLE"):
+                drop_column_match = DROP_COLUMN.match(statement)
+                if drop_column_match:
+                    table_name, column_name = drop_column_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    if table is not None:
+                        table.columns = [candidate for candidate in table.columns if candidate.name != column_name]
+                        table.foreign_keys = [
+                            fk for fk in table.foreign_keys if column_name not in fk.columns
+                        ]
+                        table.uniques = [
+                            unique for unique in table.uniques if column_name not in unique
+                        ]
+                        indexes = [
+                            index for index in indexes
+                            if index.table != table_name or column_name not in index.columns
+                        ]
+                    continue
+                add_column_match = ADD_COLUMN.match(statement)
+                if add_column_match:
+                    table_name, definition = add_column_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    if table is not None:
+                        new_column = _parse_column(definition)
+                        table.columns.append(new_column)
+                        check_match = re.search(r"\bCHECK\s*\(", definition, re.IGNORECASE)
+                        if check_match:
+                            check_body, _ = _paren_content(
+                                definition, definition.index("(", check_match.start())
+                            )
+                            table.table_checks.append(" ".join(check_body.split()))
+                    continue
+                add_check_match = ADD_CHECK_CONSTRAINT.match(statement)
+                if add_check_match:
+                    table_name = add_check_match.group(1)
+                    table = next((item for item in tables if item.name == table_name), None)
+                    if table is not None:
+                        check_start = statement.upper().find("CHECK")
+                        check_body, _ = _paren_content(statement, statement.index("(", check_start))
+                        table.table_checks.append(" ".join(check_body.split()))
+                        check_values = _parse_check_values(statement[check_start:])
+                        column_match = re.search(
+                            r"\b([a-z_][a-z0-9_]*)\s+IN\s*\(", check_body, re.IGNORECASE
+                        )
+                        if check_values and column_match:
+                            column = table.column(column_match.group(1))
+                            if column is not None:
+                                column.check_values = check_values
+                    continue
+                default_match = SET_COLUMN_DEFAULT.match(statement)
+                if default_match:
+                    table_name, column_name, default = default_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    column = table.column(column_name) if table is not None else None
+                    if column is not None:
+                        column.default = " ".join(default.split())
+                    continue
+                drop_constraint_match = DROP_CONSTRAINT.match(statement)
+                if drop_constraint_match:
+                    table_name, constraint_name = drop_constraint_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    suffix = "_fkey"
+                    prefix = f"{table_name}_"
+                    if table is not None and constraint_name.startswith(prefix) and constraint_name.endswith(suffix):
+                        column_name = constraint_name[len(prefix) : -len(suffix)]
+                        table.foreign_keys = [
+                            fk for fk in table.foreign_keys if fk.columns != [column_name]
+                        ]
+                    continue
+                foreign_key_match = ADD_FOREIGN_KEY_CONSTRAINT.match(statement)
+                if foreign_key_match:
+                    table_name = foreign_key_match.group(1)
+                    table = next((item for item in tables if item.name == table_name), None)
+                    if table is not None:
+                        key_start = statement.upper().find("FOREIGN KEY")
+                        columns, close_pos = _paren_content(
+                            statement, statement.index("(", key_start)
+                        )
+                        ref_match = re.search(
+                            r"REFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+                            statement[close_pos:],
+                            re.IGNORECASE,
+                        )
+                        if ref_match:
+                            ref_start = close_pos + ref_match.end() - 1
+                            ref_columns, ref_close = _paren_content(statement, ref_start)
+                            on_delete_match = re.search(
+                                r"ON\s+DELETE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT)",
+                                statement[ref_close:],
+                                re.IGNORECASE,
+                            )
+                            table.foreign_keys.append(ForeignKey(
+                                columns=_identifier_list(columns),
+                                ref_table=ref_match.group(1),
+                                ref_columns=_identifier_list(ref_columns),
+                                on_delete=(
+                                    " ".join(on_delete_match.group(1).upper().split())
+                                    if on_delete_match else None
+                                ),
+                            ))
+                    continue
                 column_match = RENAME_COLUMN.match(statement)
                 if column_match:
                     table_name, old_name, new_name = column_match.groups()

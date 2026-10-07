@@ -33,10 +33,13 @@ EXCLUDE_PREFIXES = (
 EXCLUDE_EXACT = (
     # 開発者向けのAI作業設定。共通モデルへのローカル相対パスを含むため公開しない。
     "AGENTS.md",
+    "CLAUDE.md",
     # 日次ETLは実行ログに銘柄名と終値を出す。公開リポジトリのActionsログは
     # 誰でも読めるため、監視銘柄が公開され続ける。運用は非公開側に残す。
     # 公開側に置くとSecretが無く、スケジュール実行が毎日失敗して赤くなる問題もある。
     ".github/workflows/daily-update.yml",
+    # 実運用DBのcleanup用。公開スナップショットのActionsに含めない。
+    ".github/workflows/cleanup-public-demo.yml",
 )
 
 # 出力ツリーに1つでも見つかったら公開を中止する。除外リストの漏れを最後に捕まえる。

@@ -63,6 +63,27 @@ class JQuantsMarketPipeline:
             self.conn.commit()
             raise
 
+    def archive_master(self, *, date: str | None = None) -> dict[str, int]:
+        """全上場銘柄マスタをrawへ保存し、Control Planeへはロードしない。"""
+        job_type = "jquants_equities_master_archive_v1"
+        run_id = _start_run(self.conn, self.source_id, job_type, self.project_root)
+        try:
+            raw = self.client.equities_master(date=date)
+            path = _write_raw(self.raw_dir, job_type, run_id, raw)
+            _finish_run(
+                self.conn, run_id, status="succeeded", fetched=len(raw), loaded=0,
+                skipped=0, failed=0, raw_path=_display_path(path, self.project_root)
+            )
+            self.conn.commit()
+            return {"run_id": run_id, "fetched": len(raw), "loaded": 0, "failed": 0}
+        except Exception as exc:
+            _finish_run(
+                self.conn, run_id, status="failed", fetched=0, loaded=0, skipped=0,
+                failed=1, raw_path=None, error_message=str(exc)
+            )
+            self.conn.commit()
+            raise
+
     def archive_market_prices(self, dates: list[str]) -> dict[str, int]:
         """指定した営業日の**全銘柄**四本値をrawとして保存する。PostgreSQLへはロードしない。
 

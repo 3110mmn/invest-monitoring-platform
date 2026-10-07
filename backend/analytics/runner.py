@@ -32,10 +32,12 @@ PREFERRED_PRICE_VIEW = "preferred_price"
 # 開示をそのまま見せるview。価格と違い、ここに採用の規則は無い。訂正開示は開示番号が
 # 別なので畳まず、どれが最新かは利用側が決める。
 FINANCIAL_DISCLOSURE_VIEW = "financial_disclosure"
+SECURITY_MASTER_VIEW = "security_master"
 
 # lake配下の配置。ビルダーの --publish と同じ単位で揃える。
 PRICE_SUBPATH = "observed/market_price"
 FINANCIAL_SUBPATH = "observed/financial_summary"
+SECURITY_MASTER_SUBPATH = "reference/security_master"
 
 _shutdown_hook_registered = False
 
@@ -180,6 +182,7 @@ def connect_lake(lake: str) -> duckdb.DuckDBPyConnection:
     """
     price_glob = lake_glob(lake, PRICE_SUBPATH)
     financial_glob = lake_glob(lake, FINANCIAL_SUBPATH)
+    security_master_glob = lake_glob(lake, SECURITY_MASTER_SUBPATH)
     connection = open_connection(price_glob)
     connection.execute(
         f"CREATE OR REPLACE VIEW {PREFERRED_PRICE_VIEW} AS "
@@ -188,6 +191,10 @@ def connect_lake(lake: str) -> duckdb.DuckDBPyConnection:
     connection.execute(
         f"CREATE OR REPLACE VIEW {FINANCIAL_DISCLOSURE_VIEW} AS SELECT * FROM "
         f"read_parquet({sql_literal(financial_glob)}, hive_partitioning = true)"
+    )
+    connection.execute(
+        f"CREATE OR REPLACE VIEW {SECURITY_MASTER_VIEW} AS SELECT * FROM "
+        f"read_parquet({sql_literal(security_master_glob)}, hive_partitioning = true)"
     )
     return connection
 

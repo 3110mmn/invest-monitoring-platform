@@ -10,19 +10,25 @@
 ## 1. テーブル × 取得元
 
 外部から取得するテーブルのみを対象とする。ユーザー入力・ETL内部生成のテーブル
-（`strategy`, `theme`, `data_source`, `ingestion_run` 等）は
+（`theme`, `data_source`, `ingestion_run` 等）は
 [データ定義書 §2](schema-data-dictionary.md)を参照。
 
 | テーブル | 採用中 | 代替・候補 | 状態 |
 |---|---|---|---|
 | `market_price_observation` | **yfinance**（管理銘柄の直近） | J-Quants `/equities/bars/daily`（全市場、84日前まで） | 期間で分担。[§2](#2-株価の取得元)を参照 |
-| `investment_target` | 手動登録 | J-Quants `/equities/master` | マスタ同期は実装済み（`jquants_sync.py master --missing`） |
+| `reference/security_master` Parquet | **J-Quants `/equities/master`** | — | 全上場銘柄。名称・市場・17/33業種を保持 |
+| `investment_target` | 手動登録 | スクリーナーからの追加 | PostgreSQLには監視対象だけを保持 |
 | `investment_target_identifier` | **J-Quants `/equities/master`** | — | `jpx_code` のみ。将来 `edinet_code` を追加 |
 | `financial_disclosure` / `financial_summary` | **J-Quants `/fins/summary`** | EDINET DB API、EDINET API | 実装済み。代替は未着手 |
 | （マクロ指標） | 未実装 | FRED | 利用要件の確定後に選定 |
 | （ベンチマーク指数） | 未実装 | J-Quants TOPIX、yfinance | 分析要件と契約プランの確定後に選定 |
 
 ## 2. 株価の取得元
+
+全上場銘柄マスタは`jquants_sync.py archive-master`でrawへ保存し、
+`build_security_master.py`で`lake/reference/security_master`へ変換します。全件を
+`investment_target`へロードしません。スクリーナーの候補集合はParquet、ユーザーが選んだ
+監視対象だけがPostgreSQLという境界を維持します。
 
 ### 優先順位
 
@@ -143,6 +149,32 @@ yfinanceは可用性で選んでいるのであって、品質で優る訳では
   過ぎると取得できず、訂正前の値も残らないため、失うと取り返せません。株価は再取得できますが、
   調整済み価格は分割で遡及して変わるため、`price_basis`と共に保持します。
 - 各取得元の規約URLは`data_source.terms_url`に保持します。
+
+### PBR計算に使う価格
+
+PBRなどの1株指標では、調整済み終値だけでは財務開示のBPSと株数基準が揃いません。そのため
+J-Quants価格Parquetには、チャートとリターンに使う調整済み`close_price`に加えて、
+`raw_close_price`と`adjustment_factor`を保持します。`point_in_time_pbr`は、価格日より前に公表済みの
+最新BPSを採用し、期末後の調整係数をBPSへ反映してから未調整終値と比較します。同日開示は時刻の
+前後を日付だけで確定できないため、翌取引日から利用可能とする保守的な規則です。
+
+日足の全プラン標準項目は列数が少なく、流動性、時価総額、コーポレートアクション等へ再利用する
+可能性が高いため、Observed Parquetで次を型付き保存します。Premium限定の前場・後場項目は、
+取得できない段階ではスキーマへ先行追加しません。
+
+| 区分 | Parquet列 |
+|---|---|
+| 未調整値 | `raw_open_price`, `raw_high_price`, `raw_low_price`, `raw_close_price`, `raw_volume` |
+| 調整済み値 | `open_price`, `high_price`, `low_price`, `close_price`, `volume`, `price_basis` |
+| 売買・規模 | `turnover_value`, `market_cap_million_yen` |
+| 権利・値幅制限 | `adjustment_factor`, `ex_rights_type`, `upper_limit_flag`, `lower_limit_flag` |
+| 来歴 | `source_key`, `ingestion_run_id`, `built_at` |
+
+yfinanceのrawには未調整終値とJ-Quants互換の調整係数を保存していないため、実データのPBRは
+J-Quants価格でのみ計算します。公開用synthetic demoは分割なし・調整係数1として同じ定義を通します。
+欠損、非正のBPS、調整係数の履歴不足は0で補完せず、`calculation_status`へ理由を残します。
+`is_below_book_value`は`0 < PBR < 1`というDerivedの事実フラグであり、割安かどうかの評価は
+Assessmentで行います。
 
 ## 再配布
 

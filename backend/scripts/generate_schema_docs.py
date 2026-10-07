@@ -4,7 +4,6 @@
 
 生成対象:
   - docs/data/schema-reference.md          全体を自動生成（手編集禁止）
-  - docs/data/er-diagram.md                ER図のmermaidブロックのみ生成
 
 検査対象（手書きの意味づけを保持したまま、構造との食い違いを検出する）:
   - docs/data/schema-data-dictionary.md のテーブル一覧・列定義
@@ -35,11 +34,8 @@ def migration_paths() -> list[Path]:
     """適用順のmigrationを返す。ファイル名の連番を順序とする。"""
     return sorted(p for p in MIGRATIONS_DIR.glob("*.py") if not p.name.startswith("__"))
 REFERENCE_PATH = REPO_ROOT / "docs" / "data" / "schema-reference.md"
-ER_DIAGRAM_PATH = REPO_ROOT / "docs" / "data" / "er-diagram.md"
 DICTIONARY_PATH = REPO_ROOT / "docs" / "data" / "schema-data-dictionary.md"
 
-GENERATED_START = "<!-- generated:er-diagram start -->"
-GENERATED_END = "<!-- generated:er-diagram end -->"
 
 MARKDOWN_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
 BACKTICK_TOKEN = re.compile(r"`([^`]+)`")
@@ -92,7 +88,7 @@ def _render_table_section(table: Table, schema: Schema) -> list[str]:
 
 
 def render_reference(schema: Schema) -> str:
-    """schema.sql の構造リファレンス全文を生成する。"""
+    """Alembic適用後の構造リファレンス全文を生成する。"""
     lines = [
         "# スキーマ構造リファレンス（自動生成）",
         "",
@@ -111,6 +107,10 @@ def render_reference(schema: Schema) -> str:
     for table in schema.tables:
         pk = ", ".join(f"`{c}`" for c in table.primary_key) or "-"
         lines.append(f"| `{table.name}` | {len(table.columns)} | {pk} |")
+    lines.append("")
+    lines.append("## テーブル間の関係")
+    lines.append("")
+    lines.append(render_er_diagram(schema))
     lines.append("")
     lines.append("## テーブル定義")
     lines.append("")
@@ -132,17 +132,6 @@ def render_er_diagram(schema: Schema) -> str:
     return "\n".join(lines)
 
 
-def _replace_generated_block(text: str, block: str, path: Path) -> str:
-    start = text.find(GENERATED_START)
-    end = text.find(GENERATED_END)
-    if start == -1 or end == -1:
-        raise SystemExit(
-            f"{path} に生成マーカーがありません。"
-            f"{GENERATED_START} と {GENERATED_END} で囲んだ範囲を用意してください。"
-        )
-    head = text[: start + len(GENERATED_START)]
-    tail = text[end:]
-    return f"{head}\n{block}\n{tail}"
 
 
 # ---------------------------------------------------------------- 検査
@@ -299,12 +288,6 @@ def check_dictionary(schema: Schema) -> list[str]:
     )
     problems += _check_dictionary_columns(schema, lines)
 
-    er_lines = ER_DIAGRAM_PATH.read_text(encoding="utf-8").splitlines()
-    problems += _check_table_enumeration(
-        "ER図 テーブル一覧",
-        _enumerated_tables(er_lines, "テーブル一覧"),
-        schema_tables,
-    )
     return problems
 
 
@@ -313,13 +296,7 @@ def check_dictionary(schema: Schema) -> list[str]:
 
 def build_outputs(schema: Schema) -> dict[Path, str]:
     """生成対象ファイルのパスと期待内容を返す。"""
-    er_text = ER_DIAGRAM_PATH.read_text(encoding="utf-8")
-    return {
-        REFERENCE_PATH: render_reference(schema),
-        ER_DIAGRAM_PATH: _replace_generated_block(
-            er_text, render_er_diagram(schema), ER_DIAGRAM_PATH
-        ),
-    }
+    return {REFERENCE_PATH: render_reference(schema)}
 
 
 def main() -> int:

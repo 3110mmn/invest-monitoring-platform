@@ -12,7 +12,7 @@
 
 出力先は2つに分かれる。**どちらも本番と同じ経路で読まれる。**
 
-- デモPostgreSQL: 戦略・テーマ・監視対象・構成・取込の来歴（Control Plane）
+- デモPostgreSQL: テーマ・監視対象・構成・取込の来歴（Control Plane）
 - デモGCS Parquet: 価格・財務（Data Plane）
 
 PostgreSQL側が残るのは移行漏れではない。公開デモがテーマや監視対象をPostgreSQLから
@@ -39,6 +39,7 @@ import random
 import subprocess
 import sys
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -71,22 +72,30 @@ REVISION_FISCAL_YEAR = 2026
 PRICE_DAYS = 500
 
 TRUNCATE_ORDER = (
+    "mandate_target_assignment",
+    "mandate_version",
+    "capital_allocation_mandate",
+    "capital_budget_version",
+    "watchlist_entry",
     "theme_investment_target",
     "investment_target_identifier",
     "ingestion_error",
     "ingestion_run",
     "investment_target",
     "theme",
-    "strategy",
     "data_source",
 )
 
 
 class Company:
-    """架空企業1社ぶんの生成条件。
+    """架空の投資対象1つぶんの生成条件。
 
-    `drift` は株価の基調、`revision` は通期予想を期中に何倍へ見直すかを表す。
-    revision > 1.0 の企業は上方修正、< 1.0 は下方修正として系列を作る。
+    `drift` は価格の基調、`revision` は通期予想を期中に何倍へ見直すかを表す。
+    revision > 1.0 は上方修正、< 1.0 は下方修正として系列を作る。
+
+    ETFは発行体の業績を持たないため、`has_financials=False` で財務開示を生成しません。
+    `product_code` はJ-Quantsの区分コードに合わせ、カタログ経由でも種別が解決されるように
+    します（`011`=内国株、`014`=ETF）。
     """
 
     def __init__(
@@ -96,10 +105,13 @@ class Company:
         base_price: float,
         drift: float,
         volatility: float,
-        base_revenue: int,
-        operating_margin: float,
-        revision: float,
-        shares: int,
+        base_revenue: int = 0,
+        operating_margin: float = 0.0,
+        revision: float = 1.0,
+        shares: int = 0,
+        target_type: str = "individual_stock",
+        product_code: str = "011",
+        has_financials: bool = True,
     ):
         self.key = key
         self.name = name
@@ -110,9 +122,23 @@ class Company:
         self.operating_margin = operating_margin
         self.revision = revision
         self.shares = shares
+        self.target_type = target_type
+        self.product_code = product_code
+        self.has_financials = has_financials
 
 
 COMPANIES = [
+    # ベンチマーク用。市場全体に連動する想定なので、個別株より値動きを小さくする。
+    Company(
+        key="MARKET.DEMO",
+        name="Demo Broad Market ETF",
+        base_price=2180.0,
+        drift=0.0003,
+        volatility=0.008,
+        target_type="etf",
+        product_code="014",
+        has_financials=False,
+    ),
     Company(
         key="ALPHA.DEMO",
         name="Alpha Semiconductor",
@@ -148,17 +174,12 @@ COMPANIES = [
     ),
 ]
 
-STRATEGIES = [
-    ("core", "Core", "長期保有を前提とする中核ポジション"),
-    ("satellite", "Satellite", "テーマの実現度に応じて機動的に入れ替える"),
-]
-
 THEMES = [
-    ("ai-data-center", "AI Data Center", "core",
+    ("ai-data-center", "AI Data Center",
      "生成AIの学習・推論需要に伴うデータセンター投資の拡大"),
-    ("factory-automation", "Factory Automation", "satellite",
+    ("factory-automation", "Factory Automation",
      "労働力不足と国内回帰による製造自動化投資"),
-    ("energy-transition", "Energy Transition", "satellite",
+    ("energy-transition", "Energy Transition",
      "電力需要の増加と電源構成の転換"),
 ]
 
@@ -169,6 +190,102 @@ THEME_MEMBERS = [
     ("factory-automation", "BETA.DEMO"),
     ("energy-transition", "GAMMA.DEMO"),
     ("energy-transition", "ALPHA.DEMO"),
+]
+
+
+# 運営が置く投資枠。**`demo_expires_at` を NULL にする。**
+#
+# 訪問者が作る枠には期限が付き、cleanupで消える。運営の枠は期限を持たないため、
+# APIが編集・削除を404で拒否し（`_require_public_demo_mandate`）、cleanupの対象にも
+# ならない。公開デモを開いた瞬間に機能が見える状態をこれで作る。枠が0件だと、
+# 訪問者は何ができるのか分からないまま空の画面を見ることになる。
+DEMO_TOTAL_BUDGET = Decimal("30000000")
+DEMO_BUDGET_CURRENCY = "JPY"
+
+
+class CuratedMandate:
+    """架空の投資枠1つぶん。
+
+    `allocation_weight` が総予算に対する比率で、金額は
+    `total_budget * allocation_weight` として読み出し時に計算される。
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        status: str,
+        purpose: str,
+        allocation_weight: float | None,
+        expected_return: float | None,
+        max_drawdown: float | None,
+        horizon_months: int | None,
+        review_cycle: str,
+        review_days: int | None,
+        benchmark_target_key: str | None,
+        members: list[tuple[str, float, str]],
+    ) -> None:
+        self.name = name
+        self.status = status
+        self.purpose = purpose
+        self.allocation_weight = allocation_weight
+        self.expected_return = expected_return
+        self.max_drawdown = max_drawdown
+        self.horizon_months = horizon_months
+        self.review_cycle = review_cycle
+        self.review_days = review_days
+        self.benchmark_target_key = benchmark_target_key
+        self.members = members
+
+
+CURATED_MANDATES = [
+    # ベンチマークは市場全体に連動するETF。個別銘柄をベンチマークにすると、
+    # 枠の目的（市場リターン）と比較対象が噛み合わない。
+    CuratedMandate(
+        name="Core｜長期市場リターン",
+        status="active",
+        purpose="長期の市場リターンを中心に据え、売買頻度を抑える",
+        allocation_weight=0.60,
+        expected_return=0.05,
+        max_drawdown=-0.40,
+        horizon_months=120,
+        review_cycle="annual",
+        review_days=90,
+        benchmark_target_key="MARKET.DEMO",
+        # 枠内で満額配分する（合計1.0）。市場全体を軸に、1銘柄だけ傾斜させる。
+        members=[
+            ("MARKET.DEMO", 0.70, "市場全体への基礎配分"),
+            ("ALPHA.DEMO", 0.30, "データセンター投資への傾斜"),
+        ],
+    ),
+    CuratedMandate(
+        name="Satellite｜テーマ選択",
+        status="active",
+        purpose="テーマの進展に応じて入れ替える",
+        allocation_weight=0.25,
+        expected_return=0.09,
+        max_drawdown=-0.50,
+        horizon_months=36,
+        review_cycle="quarterly",
+        review_days=30,
+        benchmark_target_key="MARKET.DEMO",
+        # 意図的に4割を未配分で残す。
+        members=[("BETA.DEMO", 0.60, "製造自動化の代表")],
+    ),
+    # 配分も銘柄も未確定の枠。比率がNULLだと金額も出ないことを見せる。
+    CuratedMandate(
+        name="Exploratory｜検証中",
+        status="draft",
+        purpose="仮説を小さく試す枠。配分は未確定",
+        allocation_weight=None,
+        expected_return=None,
+        max_drawdown=None,
+        horizon_months=None,
+        review_cycle="ad_hoc",
+        review_days=None,
+        benchmark_target_key=None,
+        members=[],
+    ),
 ]
 
 
@@ -259,22 +376,12 @@ def _insert_run(connection: Connection, source_id: int, job_type: str, days: int
 
 
 def _insert_masters(connection: Connection, source_id: int) -> dict[str, int]:
-    strategy_ids: dict[str, int] = {}
-    for key, name, description in STRATEGIES:
-        row = connection.execute(
-            "INSERT INTO strategy (strategy_key, strategy_name, description) "
-            "VALUES (?, ?, ?) RETURNING strategy_id",
-            (key, name, description),
-        ).fetchone()
-        assert row is not None
-        strategy_ids[key] = int(row["strategy_id"])
-
     theme_ids: dict[str, int] = {}
-    for key, name, strategy_key, description in THEMES:
+    for key, name, description in THEMES:
         row = connection.execute(
-            "INSERT INTO theme (theme_key, theme_name, strategy_id, description) "
-            "VALUES (?, ?, ?, ?) RETURNING theme_id",
-            (key, name, strategy_ids[strategy_key], description),
+            "INSERT INTO theme (theme_key, theme_name, description) "
+            "VALUES (?, ?, ?) RETURNING theme_id",
+            (key, name, description),
         ).fetchone()
         assert row is not None
         theme_ids[key] = int(row["theme_id"])
@@ -285,13 +392,17 @@ def _insert_masters(connection: Connection, source_id: int) -> dict[str, int]:
             """
             INSERT INTO investment_target
                 (target_key, target_name, target_type, market, currency)
-            VALUES (?, ?, 'individual_stock', 'Demo Exchange', 'JPY')
+            VALUES (?, ?, ?, 'Demo Exchange', 'JPY')
             RETURNING target_id
             """,
-            (company.key, company.name),
+            (company.key, company.name, company.target_type),
         ).fetchone()
         assert row is not None
         target_ids[company.key] = int(row["target_id"])
+        connection.execute(
+            "INSERT INTO watchlist_entry (target_id, status) VALUES (?, 'monitoring')",
+            (target_ids[company.key],),
+        )
         connection.execute(
             """
             INSERT INTO investment_target_identifier
@@ -343,6 +454,7 @@ def _build_price_rows(run_id: int) -> list[dict[str, Any]]:
             high = max(open_price, price) + rng.uniform(0, intraday)
             low = min(open_price, price) - rng.uniform(0, intraday)
             volume = rng.uniform(0.8, 1.6) * company.shares * 0.004
+            rounded_price = round(price, 1)
 
             rows.append(
                 {
@@ -350,12 +462,27 @@ def _build_price_rows(run_id: int) -> list[dict[str, Any]]:
                     "jpx_code": None,
                     "source_key": DEMO_SOURCE_KEY,
                     "obs_date": day,
+                    # syntheticデータには分割イベントを入れていないため、未調整値と
+                    # 調整済み値は同じで調整係数は1。公開デモでも実環境と同じPBR定義を通す。
+                    "raw_open_price": round(open_price, 1),
+                    "raw_high_price": round(high, 1),
+                    "raw_low_price": round(max(low, 1.0), 1),
+                    "raw_close_price": rounded_price,
+                    "raw_volume": float(round(volume)),
+                    "turnover_value": float(round(price * volume)),
                     "open_price": round(open_price, 1),
                     "high_price": round(high, 1),
                     "low_price": round(max(low, 1.0), 1),
-                    "close_price": round(price, 1),
+                    "close_price": rounded_price,
                     "volume": float(round(volume)),
                     "price_basis": "adjusted",
+                    "adjustment_factor": 1.0,
+                    "market_cap_million_yen": round(
+                        price * company.shares / 1_000_000, 1
+                    ),
+                    "ex_rights_type": None,
+                    "upper_limit_flag": False,
+                    "lower_limit_flag": False,
                     "ingestion_run_id": run_id,
                     "built_at": built_at,
                 }
@@ -488,6 +615,8 @@ def _build_disclosure_rows(run_id: int, columns: list[str]) -> list[dict[str, An
     """syntheticな開示をParquetの行として作る。"""
     rows: list[dict[str, Any]] = []
     for company in COMPANIES:
+        if not company.has_financials:
+            continue
         for fiscal_year in (2025, 2026):
             for period, period_start, period_end, disclosed in _quarter_periods(fiscal_year):
                 if disclosed > TODAY:
@@ -533,6 +662,76 @@ def _build_disclosure_rows(run_id: int, columns: list[str]) -> list[dict[str, An
                     )
                 )
     return rows
+
+
+def _insert_curated_mandates(
+    connection: Connection, target_ids: dict[str, int]
+) -> int:
+    """運営が置く投資枠を入れる。
+
+    **`demo_expires_at` を渡さない（NULLのまま）。** これが訪問者の枠との違いで、
+    APIは期限のない枠への編集・削除を404で拒否し、cleanupも消さない。
+
+    総予算も1件だけ置く。`budget_amount` は読み出し時に
+    `total_budget * allocation_weight` として計算されるため、これが無いと
+    金額欄が空のままになる。
+    """
+    connection.execute(
+        """
+        INSERT INTO capital_budget_version
+            (version_no, total_budget, currency, change_reason)
+        VALUES (1, ?, ?, ?)
+        """,
+        (DEMO_TOTAL_BUDGET, DEMO_BUDGET_CURRENCY, "デモ用の初期予算"),
+    )
+
+    for mandate in CURATED_MANDATES:
+        row = connection.execute(
+            """
+            INSERT INTO capital_allocation_mandate (mandate_name, status)
+            VALUES (?, ?) RETURNING mandate_id
+            """,
+            (mandate.name, mandate.status),
+        ).fetchone()
+        assert row is not None
+        mandate_id = int(row["mandate_id"])
+
+        benchmark_id = (
+            target_ids[mandate.benchmark_target_key]
+            if mandate.benchmark_target_key
+            else None
+        )
+        version = connection.execute(
+            """
+            INSERT INTO mandate_version (
+                mandate_id, version_no, purpose, allocation_weight,
+                expected_return, max_drawdown, horizon_months, benchmark_target_id,
+                review_cycle, next_review_at, change_reason
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING mandate_version_id
+            """,
+            (
+                mandate_id, mandate.purpose, mandate.allocation_weight,
+                mandate.expected_return, mandate.max_drawdown, mandate.horizon_months,
+                benchmark_id, mandate.review_cycle,
+                TODAY + timedelta(days=mandate.review_days) if mandate.review_days else None,
+                "初期version",
+            ),
+        ).fetchone()
+        assert version is not None
+        version_id = int(version["mandate_version_id"])
+
+        for target_key, weight, rationale in mandate.members:
+            connection.execute(
+                """
+                INSERT INTO mandate_target_assignment
+                    (mandate_version_id, target_id, status, target_weight, rationale)
+                VALUES (?, ?, 'active', ?, ?)
+                """,
+                (version_id, target_ids[target_key], weight, rationale),
+            )
+
+    return len(CURATED_MANDATES)
 
 
 def assert_demo_database(connection: Connection) -> str:
@@ -604,8 +803,8 @@ def publish_demo_parquet(local_dir: Path, destination: str) -> None:
         [
             "gcloud", "storage", "rsync", "--recursive",
             "--delete-unmatched-destination-objects",
-            str(local_dir / "observed"),
-            f"{destination.rstrip('/')}/observed",
+            str(local_dir),
+            destination.rstrip("/"),
         ],
         capture_output=True,
         text=True,
@@ -636,14 +835,17 @@ def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[
     price_run = _insert_run(connection, source_id, "demo_prices", PRICE_DAYS)
     financial_run = _insert_run(connection, source_id, "demo_financials", 730)
     # 銘柄マスタとテーマ構成はPostgreSQLに残る。監視対象はControl Planeの領分。
-    _insert_masters(connection, source_id)
+    target_ids = _insert_masters(connection, source_id)
+    # 運営が置く投資枠。期限を持たないので訪問者からは編集できず、cleanupでも消えない。
+    mandates = _insert_curated_mandates(connection, target_ids)
     # 価格も財務もPostgreSQLへ入れない。読み出し経路は分析層の1本だけなので、
-    # Parquetへ書く。PostgreSQLに残るのは戦略・テーマ・監視対象・構成だけになる。
+    # Parquetへ書く。PostgreSQLに残るのはテーマ・監視対象・構成だけになる。
     return {
         "themes": len(THEMES),
         "targets": len(COMPANIES),
         "price_run": price_run,
         "financial_run": financial_run,
+        "mandates": mandates,
     }
 
 
@@ -671,7 +873,7 @@ def main() -> int:
     parser.add_argument(
         "--parquet-out",
         type=Path,
-        default=Path("data/demo-parquet"),
+        default=Path(__file__).resolve().parents[2] / "data" / "demo-parquet",
         help="syntheticな価格Parquetの出力先",
     )
     parser.add_argument(
@@ -704,8 +906,11 @@ def main() -> int:
 
     # 価格も財務も分析層へ書く。PostgreSQLには入れない。
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import pyarrow as pa
+    import pyarrow.parquet as pq
     from build_financial_parquet import DISCLOSURE_FIELDS, build_schema
     from build_parquet import PRICE_SCHEMA
+    from build_security_master import SECURITY_MASTER_SCHEMA
 
     financial_schema = build_schema()
     metadata = {name for name, _ in DISCLOSURE_FIELDS}
@@ -725,14 +930,43 @@ def main() -> int:
         schema=financial_schema,
         date_column="disclosed_date",
     )
-
+    master_dir = args.parquet_out / "reference" / "security_master"
+    master_dir.mkdir(parents=True, exist_ok=True)
+    master_rows = [
+        {
+            "security_key": company.key,
+            "jpx_code": company.key,
+            "target_key": company.key,
+            "company_name": company.name,
+            "company_name_english": company.name,
+            "product_category_code": company.product_code,
+            "market_code": "DEMO",
+            "market_name": "Demo Market",
+            "sector_17_code": "DEMO",
+            "sector_17_name": "Demo Sector",
+            "sector_33_code": "DEMO",
+            "sector_33_name": "Demo Sector",
+            "scale_category": None,
+            "source_key": DEMO_SOURCE_KEY,
+            "source_date": TODAY,
+            "ingestion_run_id": counts["price_run"],
+            "built_at": datetime.now(UTC),
+        }
+        for company in COMPANIES
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(master_rows, schema=SECURITY_MASTER_SCHEMA),
+        master_dir / "part-0.parquet",
+        compression="zstd",
+    )
     print(
         "デモデータを投入しました（PostgreSQL）: "
-        f"テーマ{counts['themes']}件 / 銘柄{counts['targets']}件"
+        f"テーマ{counts['themes']}件 / 銘柄{counts['targets']}件 / 投資枠{counts['mandates']}件"
     )
     print(f"Parquet → {args.parquet_out}")
     print(f"  価格: {sum(prices.values()):,}行  {dict(prices)}")
     print(f"  開示: {sum(disclosures.values()):,}行  {dict(disclosures)}")
+    print(f"  銘柄マスタ: {len(master_rows):,}行")
     if args.publish:
         publish_demo_parquet(args.parquet_out, args.publish)
         print(f"公開先: {args.publish}")

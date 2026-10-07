@@ -8,21 +8,8 @@
 スキーマ変更と文書生成の手順は開発ガイドを正本とします。CIは本書のテーブル・列とmigrationの
 不足・余剰を検出します。
 
-現在の定義はAlembic revision `0003_master_schema_boundaries` 適用後を対象とします。
-
-### `0003_master_schema_boundaries`での変更
-
-| 変更前 | 変更後 | 理由・移行規則 |
-|---|---|---|
-| `investment_target.is_active` | `investment_target.is_monitored` | 商品の有効性ではなく、このアプリで監視するかを表す列だったため改名。真偽値はそのまま引き継ぐ |
-| `theme_investment_target`の複合主キー | `membership_id`による所属期間単位の主キー | 同じテーマと銘柄を解除後に再登録でき、過去の所属期間も保持できるようにする |
-| `theme_investment_target.is_active` | `effective_from` / `effective_to` | 有効・無効の現在値ではなく、所属していた期間を事実として保持する |
-| `theme_investment_target.basket_weight` | Masterから削除 | ウェイトは所属の事実ではなく配分判断であるため、将来のDecision領域で管理する |
-| `theme_investment_target.rationale` | Masterから削除 | 採用理由は所属の事実ではなく評価・解釈であるため、将来のAssessment領域で管理する |
-
-旧relationの有効行は`effective_to = NULL`、無効行は旧`updated_at`を`effective_to`として移行します。
-旧`created_at`は`effective_from`と新しい`created_at`へ引き継ぎます。削除したウェイトと採用理由は、
-意味の異なる領域へ機械的に移さず、移行対象外とします。
+現在の定義は最新のAlembic revision適用後を対象とします。**スキーマ変更の履歴は
+`backend/migrations/versions/`とgitが正本です。** 本書は履歴ではなく現在の意味を持ちます。
 
 ## 1. 共通データ規約
 
@@ -33,7 +20,7 @@
 | 日時 | `TIMESTAMPTZ`、原則UTC。外部APIの日時を保持する場合は変換規則をETLに明記 |
 | 時刻 | `TIME` |
 | 真偽値 | `BOOLEAN` |
-| 金額 | 通貨の最小単位を `BIGINT` で保持。財務データは原則「円」 |
+| 金額 | 財務実績は通貨の最小単位を`BIGINT`で保持。ユーザーが入力する予算・上限は小数通貨にも対応できる`NUMERIC(20, 2)` |
 | 株価・比率 | `DOUBLE PRECISION`。通貨は `investment_target.currency`、単位は列定義または取得元定義に従う |
 | 株式数 | `BIGINT`、単位は株 |
 | 欠損 | 不明・未提供は `NULL`。空文字やゼロで補完しない |
@@ -49,9 +36,13 @@
 
 | PostgreSQLテーブル | データ区分 | 主な生成主体 |
 |---|---|---|
-| `strategy` | ユーザー入力 | Strategy API |
+| `capital_allocation_mandate` | ユーザー入力 | Mandate API |
+| `capital_budget_version` | ユーザー入力 | Mandate API。総投資予算変更時に新規versionを生成 |
+| `mandate_version` | ユーザー入力 | Mandate API。投資枠改訂時に新規versionを生成 |
+| `mandate_target_assignment` | ユーザー入力・内部計算 | Mandate API。Target採用・配分範囲を入力し、目標金額は取得時に計算 |
 | `theme` | ユーザー入力 | Theme API |
 | `investment_target` | ユーザー入力・外部マスタ | Investment Target API、銘柄マスタ同期 |
+| `watchlist_entry` | ユーザー入力 | Investment Target API。検討・監視状態を管理 |
 | `data_source` | システム設定 | ETLの取得元登録処理 |
 | `ingestion_run` | ETL内部生成 | バックフィル・差分更新ジョブ |
 | `ingestion_error` | ETL内部生成 | 取得・正規化・検証・保存時のエラー記録 |
@@ -72,9 +63,13 @@
 
 | 区分 | テーブル | 1レコードの粒度 |
 |---|---|---|
-| マスタ | `strategy` | 1投資戦略 |
+| Context | `capital_allocation_mandate` | 1つの投資枠 |
+| Context履歴 | `capital_budget_version` | 総投資予算の1有効version |
+| Context履歴 | `mandate_version` | 1 Mandateの1有効version |
+| 配分関係 | `mandate_target_assignment` | 1 Mandate versionと1 Investment Targetの採用・配分範囲 |
 | マスタ | `theme` | 1投資テーマ |
-| マスタ | `investment_target` | 1内部銘柄・指数 |
+| マスタ | `investment_target` | 1つの売買可能な投資商品 |
+| 監視状態 | `watchlist_entry` | 1登録済み投資対象の現在の検討・監視状態 |
 | 取得基盤 | `data_source` | 1外部データソース |
 | 取得基盤 | `ingestion_run` | 1回の取得・ETLジョブ実行 |
 | 取得基盤 | `ingestion_error` | 1実行内の1エラー |
@@ -84,16 +79,89 @@
 
 ## 4. マスタ
 
-### `strategy`
+### `capital_allocation_mandate`
+
+投資目的・資金配分・成果測定単位の安定した同一性を保持します。UIでは「投資枠」と表示します。
+予算・制約等の変更履歴は`mandate_version`へ追加します。
 
 | 列 | 定義 |
 | --- | --- |
-| `strategy_id` | 主キー |
-| `strategy_key` | システム内で不変の戦略キー。一意 |
-| `strategy_name` | 表示名 |
-| `description` | 説明 |
-| `is_active` | 有効フラグ。既定値 `TRUE` |
+| `mandate_id` | 主キー |
+| `mandate_key` | DBの連番から`mandate-000001`形式で自動採番する不変キー。一意。ユーザー入力しない |
+| `mandate_name` | 表示名 |
+| `status` | `draft` / `active` / `suspended` / `retired` |
+| `demo_expires_at` | 公開デモで作成した一時データの期限。通常・seedデータはNULL。期限後はAPIから隠し、cleanup jobが物理削除 |
 | `created_at`, `updated_at` | 作成・更新日時 |
+
+### `mandate_version`
+
+判断時点の目的・予算・制約を再現するためのversionです。現在versionは`effective_until IS NULL`で、
+Mandateごとに最大1件です。
+
+| 列 | 定義 |
+| --- | --- |
+| `mandate_version_id` | 主キー |
+| `mandate_id` | `capital_allocation_mandate`への参照 |
+| `version_no` | Mandate内の連番。1以上でMandate内一意 |
+| `purpose` | 投資目的・運用方針 |
+| `allocation_weight` | 総投資予算に対するこの投資枠の配分率。0以上1以下。運用中・下書きの合計1以下をAPIで検証 |
+| `budget_amount` | 0006以前のversionに保存された絶対予算の履歴。0007以降の新規versionではNULL。現行予算の計算には使わない |
+| `currency` | 旧versionの絶対予算に対応する通貨の履歴。新規versionではNULL。現行予算の通貨は`capital_budget_version.currency` |
+| `expected_return` | 期待収益率。例：5%は`0.05`。任意 |
+| `max_drawdown` | 許容最大ドローダウン。`-1`以上`0`以下。例：-40%は`-0.4` |
+| `horizon_months` | 想定投資期間（月）。任意 |
+| `benchmark_target_id` | 任意のベンチマークInvestment Target |
+| `review_cycle` | 見直し周期。`monthly` / `quarterly` / `semiannual` / `annual` / `ad_hoc` / `other`。任意 |
+| `review_cycle_custom` | `review_cycle = other`のときの自由記述。それ以外はNULL |
+| `next_review_at` | 次回見直し予定日 |
+| `effective_from`, `effective_until` | versionの有効期間。現在versionは`effective_until IS NULL` |
+| `change_reason` | 初版作成または改訂理由 |
+| `created_at` | version作成日時 |
+
+### `capital_budget_version`
+
+投資枠へ配分する総投資予算の履歴です。現在versionは`effective_until IS NULL`で最大1件です。
+
+| 列 | 定義 |
+| --- | --- |
+| `capital_budget_version_id` | 主キー |
+| `version_no` | 総投資予算の連番version |
+| `total_budget` | 投資枠へ配分する総額。0以上 |
+| `currency` | ISO 4217の3文字通貨コード |
+| `effective_from`, `effective_until` | versionの有効期間。現在versionは`effective_until IS NULL` |
+| `change_reason` | 総投資予算を変更した理由 |
+| `created_at` | version作成日時 |
+
+### `mandate_target_assignment`
+
+Mandate versionで採用する売買対象と目標配分範囲を有効期間付きで保持します。変更・解除時は既存行を
+削除・上書きせず`effective_until`を閉じ、新しい状態は新しい行として追加します。現在の状態は
+`effective_until IS NULL`で取得します。Theme membershipとは独立し、MandateとThemeを直接結びません。
+
+| 列 | 定義 |
+| --- | --- |
+| `assignment_id` | 主キー。配分状態の各履歴行を識別 |
+| `mandate_version_id` | 配分が属するMandate version |
+| `target_id` | 採用するInvestment Target |
+| `status` | `draft` / `active` / `suspended` / `retired` |
+| `target_weight` | 任意の目標配分率。0以上1以下。有効Assignmentの合計1以下をAPIで検証 |
+| `minimum_weight` | 任意の配分下限。目標配分以下 |
+| `maximum_weight` | 任意の配分上限。目標配分以上 |
+| `effective_from`, `effective_until` | Assignment状態の有効期間。変更・解除時に終了日時を記録 |
+| `rationale` | このMandateでTargetを採用した理由 |
+| `created_at`, `updated_at` | 履歴行の作成・更新日時。業務上の有効期間とは区別 |
+
+同じMandate version・Investment Targetの履歴行は複数保持できますが、未終了行は1件までです。
+Mandate自体を改訂すると旧versionの現行Assignmentを終了し、新versionへその時点の状態を複製します。
+配分変更履歴を分析するときは、`mandate_version_id`、`target_id`、`effective_from`、`effective_until`を使います。
+
+投資枠予算は`capital_budget_version.total_budget * mandate_version.allocation_weight`、Targetの目標金額は
+さらに`target_weight`を乗じて取得時に計算し、保存しません。
+
+過去時点の予算を再現する場合は、対象日時を含む`mandate_version`と`capital_budget_version`をそれぞれ
+`effective_from <= 対象日時 < effective_until`（終了がNULLなら無期限）で選び、その時点の総額と配分率を掛けます。
+0006以前の旧versionに配分率がない場合のみ、そのversionに保存された`budget_amount`と`currency`を
+過去履歴の値として参照します。現行APIは現在値の表示用であり、この過去時点検索はまだ実装していません。
 
 ### `theme`
 
@@ -102,7 +170,6 @@
 | `theme_id` | 主キー |
 | `theme_key` | システム内で不変のテーマキー。一意 |
 | `theme_name` | 表示名 |
-| `strategy_id` | `strategy`への参照。戦略分類の正本 |
 | `description` | 投資テーマの説明 |
 | `is_active` | 有効フラグ |
 | `created_at`, `updated_at` | 作成・更新日時 |
@@ -112,13 +179,26 @@
 | 列 | 定義 |
 | --- | --- |
 | `target_id` | 内部銘柄主キー |
-| `target_key` | 内部互換キー。一意。例: `8697.T`, `TOPIX`, `^VIX` |
-| `target_name` | 銘柄・指数名 |
-| `target_type` | `individual_stock` / `etf` / `mutual_fund` / `reit` / `bond` / `index` / `commodity` |
+| `target_key` | 内部互換キー。一意。例: `7203.T`, `1306.T`, `2559.T` |
+| `target_name` | 投資商品名 |
+| `target_type` | 売買可能な商品の形態。`individual_stock`（上場REITを含む） / `etf` / `mutual_fund` / `bond` |
 | `market` | 市場・取引所 |
 | `currency` | ISO 4217通貨コードを推奨。例: `JPY`, `USD` |
-| `is_monitored` | このアプリで現在監視する対象なら `TRUE`。上場状態や商品自体の有効性は表さない |
 | `created_at`, `updated_at` | 作成・更新日時 |
+
+`investment_target`は選択した投資対象の共通ID台帳であり、全銘柄マスタではありません。全銘柄の名称・市場・業種は
+Parquetの`security_master`から検索します。投資枠への採用時は必要な対象だけ登録し、Watchlistへは自動追加しません。
+
+### `watchlist_entry`
+
+| 列 | 定義 |
+| --- | --- |
+| `target_id` | `investment_target`への外部キー・主キー |
+| `status` | `considering`（検討中）/ `monitoring`（監視中）/ `paused`（監視停止） |
+| `created_at`, `updated_at` | 登録・更新日時 |
+
+行が無い場合はWatchlist未登録です。Mandateへの採用は`mandate_target_assignment`、実保有は将来の
+Action／Position取り込みで判定し、Watchlistの状態からは推定しません。APIの`is_monitored`は互換用の計算値です。
 
 ## 5. データ取得・外部識別子
 
@@ -219,8 +299,8 @@ Relationship APIで追加すると、現在行がなければ新しいmembership
 
 ## 9. 削除・履歴保持方針
 
-- 戦略・テーマは原則物理削除せず、`is_active = FALSE`にします。投資対象の監視停止は
-  `investment_target.is_monitored = FALSE`にします。
+- テーマは原則物理削除せず、`is_active = FALSE`にします。投資対象の監視停止は
+  `watchlist_entry.status = 'paused'`、Watchlistからの除外はその行の削除で表します。
 - テーマと銘柄の所属解除は物理削除せず、現在行の`effective_to`を設定します。
 - 時系列、取込履歴、財務開示は再現性確保のため履歴を保持します。
 - その他の外部キーには自動削除を設定していません。参照中の親レコード削除は失敗させます。

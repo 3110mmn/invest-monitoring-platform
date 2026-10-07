@@ -1,4 +1,4 @@
-"""schema.sql とドキュメントの整合性を検査するテスト。
+"""Alembic migrationとドキュメントの整合性を検査するテスト。
 
 生成物が古い場合や、手書きのデータ定義書がスキーマとずれた場合に失敗する。
 """
@@ -7,7 +7,7 @@ from scripts import generate_schema_docs as docs
 
 
 def test_generated_docs_are_up_to_date():
-    """生成対象ファイルが schema.sql の現在の内容と一致する。"""
+    """生成対象ファイルがmigration適用後のスキーマと一致する。"""
     schema = docs.parse_schema(docs.migration_paths())
     for path, expected in docs.build_outputs(schema).items():
         actual = path.read_text(encoding="utf-8") if path.exists() else None

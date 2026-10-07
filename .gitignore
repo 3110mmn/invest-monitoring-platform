@@ -12,11 +12,22 @@ backend/.env
 backend/.env.neon
 # provision_roles.py が出力する接続URL。環境ごとに増えるためワイルドカードで塞ぐ。
 backend/.env.neon.*
-data/raw/
+# neonctl がカレントに作るローカル設定。リポジトリには持ち込まない。
+.neon
+**/data/raw/
 # rawから再生成できる派生物。正本ではないので追跡しない。
-data/parquet/
+**/data/parquet/
+# **PostgreSQLの論理バックアップ。実データそのものなのでリポジトリへ入れない。**
+# 日次ワークフローと手動のmigration前バックアップがここへ書き、GCSへ上げる。
+**/data/backups/
+**/data/local-backups/
 # 公開デモ用のsynthetic Parquet。seed_demo.py が生成し、GCSへ公開する派生物。
-data/demo-parquet/
+**/data/demo-parquet/
+
+# 探索分析の一時出力。再生成でき、分析結果の正本ではない。
+research/outputs/*
+!research/outputs/.gitkeep
+research/**/.ipynb_checkpoints/
 
 # Next.js 16 が `npm run dev` のたびに生成するエージェント向け設定。成果物ではない。
 # `frontend/AGENTS.md` は公開スナップショットの除外対象（ルートの AGENTS.md）とは
@@ -41,5 +52,10 @@ memo/*
 !memo/plan/
 !memo/infrastructure/
 !memo/jquants/
+!memo/causal-models/
 .obsidian/
 gha-creds-*.json
+
+# 証券会社等から出力した実取引・残高データ。個人の取引情報を含むため追跡しない。
+/取り込みデータ/**
+!/取り込みデータ/README.md

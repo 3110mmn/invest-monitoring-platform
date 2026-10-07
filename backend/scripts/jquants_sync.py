@@ -36,7 +36,15 @@ def find_unmapped_jquants_codes(conn: Connection) -> list[str]:
         """
         SELECT a.target_key
         FROM investment_target a
-        WHERE a.is_monitored = TRUE
+        WHERE (EXISTS (SELECT 1 FROM watchlist_entry w
+                       WHERE w.target_id = a.target_id AND w.status = 'monitoring')
+               OR EXISTS (
+                   SELECT 1 FROM mandate_target_assignment ma
+                   JOIN mandate_version v ON v.mandate_version_id = ma.mandate_version_id
+                   JOIN capital_allocation_mandate m ON m.mandate_id = v.mandate_id
+                   WHERE ma.target_id = a.target_id AND ma.status = 'active'
+                     AND v.effective_until IS NULL AND m.status = 'active'
+               ))
           AND NOT EXISTS (
               SELECT 1
               FROM investment_target_identifier ai
@@ -141,6 +149,11 @@ def main() -> None:
     )
     master.add_argument("--date", type=iso_date, help="基準日 YYYY-MM-DD")
 
+    archive_master = subparsers.add_parser(
+        "archive-master", help="全上場銘柄マスタをrawへ保存（PostgreSQLへはロードしない）"
+    )
+    archive_master.add_argument("--date", type=iso_date, help="基準日 YYYY-MM-DD")
+
     archive = subparsers.add_parser(
         "archive-prices",
         help="全銘柄の日次四本値をrawへ保存する。PostgreSQLへはロードしない",
@@ -193,6 +206,8 @@ def main() -> None:
                     )
                 return
             result = pipeline.sync_master(code=args.code, date=args.date)
+        elif args.command == "archive-master":
+            result = pipeline.archive_master(date=args.date)
         elif args.command == "archive-prices":
             dates = resolve_archive_dates(
                 conn, args, "jquants_market_prices_archive_v1", parser

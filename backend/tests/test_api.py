@@ -5,7 +5,6 @@ def theme_payload(key: str = "rates") -> dict:
     return {
         "theme_key": key,
         "theme_name": "Rates",
-        "strategy_id": 1,
         "description": "Interest-rate theme",
     }
 
@@ -25,6 +24,97 @@ def test_read_only_mode_allows_reads_and_rejects_writes(client, monkeypatch):
     assert response.status_code == 405
     assert response.json()["error"]["message"] == "API is running in read-only mode"
     assert response.json()["error"]["code"] == "method_not_allowed"
+
+
+def test_public_demo_only_allows_bounded_temporary_mandate_writes(client, monkeypatch):
+    monkeypatch.setattr(settings, "database_read_only", False)
+    monkeypatch.setattr(settings, "management_api_enabled", False)
+    monkeypatch.setattr(settings, "public_demo_write_enabled", False)
+    # Seeded demo samples are not owned by a public visitor and must remain immutable.
+    seeded = client.post("/api/mandates/", json={
+        "mandate_name": "Seeded sample",
+        "purpose": "Read-only demo sample",
+        "status": "draft",
+    })
+    assert seeded.status_code == 201
+    seeded_id = seeded.json()["mandate_id"]
+
+    monkeypatch.setattr(settings, "public_demo_write_enabled", True)
+    monkeypatch.setattr(settings, "database_environment_override", "demo")
+    monkeypatch.setattr(
+        settings,
+        "database_url",
+        "postgresql://invest_demo_writer:secret@example.neon.tech/neondb",
+    )
+    monkeypatch.setattr(settings, "public_demo_max_active_mandates", 1)
+
+    created = client.post("/api/mandates/", json={
+        "mandate_name": "Temporary sandbox",
+        "purpose": "Test allocation inputs",
+        "status": "active",
+    })
+    assert created.status_code == 201
+    mandate = created.json()
+    assert mandate["status"] == "draft"
+    assert mandate["demo_expires_at"] is not None, mandate
+    assert mandate["mandate_id"] != seeded_id
+
+    # Write endpoints outside the narrow mandate sandbox remain closed.
+    assert client.post("/api/themes/", json=theme_payload()).status_code == 405
+    assert client.put("/api/mandates/capital-budget", json={}).status_code == 405
+    assert client.get("/api/data/runs").status_code == 404
+    assert client.put(
+        f"/api/mandates/{mandate['mandate_id']}/securities/1306.T", json={}
+    ).status_code == 405
+
+    # Public visitors cannot revise or delete seed data.
+    assert client.patch(
+        f"/api/mandates/{seeded_id}", json={"change_reason": "test"}
+    ).status_code == 404
+    assert client.delete(f"/api/mandates/{seeded_id}").status_code == 404
+
+    revised = client.patch(
+        f"/api/mandates/{mandate['mandate_id']}",
+        json={"mandate_name": "Updated sandbox", "change_reason": "UI test"},
+    )
+    assert revised.status_code == 200
+    assert revised.json()["mandate_name"] == "Updated sandbox"
+
+    # A shared demo quota prevents unbounded persistent growth.
+    second = client.post("/api/mandates/", json={
+        "mandate_name": "Over quota",
+        "purpose": "Should be rejected",
+    })
+    assert second.status_code == 422
+
+    assert client.delete(f"/api/mandates/{mandate['mandate_id']}").status_code == 204
+
+
+def test_public_demo_writes_fail_closed_without_demo_database_role(client, monkeypatch):
+    monkeypatch.setattr(settings, "database_read_only", False)
+    monkeypatch.setattr(settings, "management_api_enabled", False)
+    monkeypatch.setattr(settings, "public_demo_write_enabled", True)
+    monkeypatch.setattr(settings, "database_environment_override", "demo")
+    monkeypatch.setattr(settings, "database_url", "postgresql://wrong_role:secret@host/neondb")
+
+    response = client.post("/api/mandates/", json={
+        "mandate_name": "No write",
+        "purpose": "This must fail closed",
+    })
+
+    assert response.status_code == 503
+
+
+def test_public_demo_cleanup_requires_dedicated_database_role():
+    from cleanup_public_demo import require_demo_database
+
+    require_demo_database("postgresql://invest_demo_cleanup:secret@host/neondb")
+    try:
+        require_demo_database("postgresql://owner:secret@host/neondb")
+    except RuntimeError as exc:
+        assert "invest_demo_cleanup" in str(exc)
+    else:
+        raise AssertionError("Expected unsafe cleanup URL to be rejected")
 
 
 def test_readiness_without_ingestion_history_is_ready(client):
@@ -193,17 +283,6 @@ def test_missing_theme_returns_not_found(client):
     assert client.get("/api/themes/999").status_code == 404
 
 
-def test_strategy_route_is_not_shadowed_by_theme_id(client):
-    created = client.post(
-        "/api/themes/strategies/",
-        json={"strategy_key": "macro", "strategy_name": "Macro"},
-    )
-    assert created.status_code == 201
-    response = client.get("/api/themes/strategies/")
-    assert response.status_code == 200
-    assert "macro" in {strategy["strategy_key"] for strategy in response.json()}
-
-
 def test_create_investment_target(client):
     response = client.post(
         "/api/investment-targets/",
@@ -214,8 +293,26 @@ def test_create_investment_target(client):
     assert response.json()["is_monitored"] is True
 
 
+def test_investment_target_type_is_a_tradable_instrument_category(client):
+    for target_type in ("individual_stock", "etf", "mutual_fund", "bond"):
+        response = client.post("/api/investment-targets/", json={
+            "target_key": f"test-{target_type}",
+            "target_name": "Test instrument",
+            "target_type": target_type,
+        })
+        assert response.status_code == 201
+
+    for target_type in ("reit", "index", "commodity"):
+        response = client.post("/api/investment-targets/", json={
+            "target_key": f"legacy-{target_type}",
+            "target_name": "Legacy category",
+            "target_type": target_type,
+        })
+        assert response.status_code == 422
+
+
 def test_investment_target_monitoring_state_is_explicit(client):
-    """監視状態は商品の有効性ではなく、`is_monitored`として更新・検索する。"""
+    """監視状態は投資対象IDから独立したWatchlistで管理する。"""
     target_id = client.post(
         "/api/investment-targets/",
         json={"target_key": "SPY", "target_name": "S&P 500 ETF", "target_type": "etf"},
@@ -227,8 +324,21 @@ def test_investment_target_monitoring_state_is_explicit(client):
 
     assert updated.status_code == 200
     assert updated.json()["is_monitored"] is False
+    assert updated.json()["watchlist_status"] == "paused"
     monitored = client.get("/api/investment-targets/?is_monitored=true").json()
     assert target_id not in {row["target_id"] for row in monitored}
+
+    considering = client.patch(
+        f"/api/investment-targets/{target_id}", json={"watchlist_status": "considering"}
+    )
+    assert considering.json()["watchlist_status"] == "considering"
+    assert considering.json()["is_monitored"] is False
+
+    removed = client.patch(
+        f"/api/investment-targets/{target_id}", json={"watchlist_status": None}
+    )
+    assert removed.json()["watchlist_status"] is None
+    assert client.get(f"/api/investment-targets/{target_id}").status_code == 200
 
 
 def test_duplicate_target_key_returns_conflict(client):
@@ -288,13 +398,8 @@ def test_price_endpoints_return_nothing_when_the_analytics_layer_is_empty(client
 
 def test_theme_constituents_include_membership_identity(client, db):
     """現在の構成銘柄は、所属履歴のIDと開始時点つきで返る。"""
-    # strategy は schema.sql が初期投入しているため、既存を参照する
-    strategy_id = db.execute(
-        "SELECT strategy_id FROM strategy WHERE strategy_key = 'core'"
-    ).fetchone()[0]
     theme_id = db.execute(
-        "INSERT INTO theme (theme_key, theme_name, strategy_id) VALUES ('ai', 'AI', ?)",
-        (strategy_id,),
+        "INSERT INTO theme (theme_key, theme_name) VALUES ('ai', 'AI')",
     ).lastrowid
     target_id = db.execute(
         "INSERT INTO investment_target (target_key, target_name, target_type) "
@@ -316,13 +421,8 @@ def test_theme_constituents_include_membership_identity(client, db):
 
 def test_theme_constituents_are_empty_for_theme_without_targets(client, db):
     """銘柄が紐づいていないテーマでは空配列を返す（404にしない）。"""
-    # strategy は schema.sql が初期投入しているため、既存を参照する
-    strategy_id = db.execute(
-        "SELECT strategy_id FROM strategy WHERE strategy_key = 'core'"
-    ).fetchone()[0]
     theme_id = db.execute(
-        "INSERT INTO theme (theme_key, theme_name, strategy_id) VALUES ('empty', '空', ?)",
-        (strategy_id,),
+        "INSERT INTO theme (theme_key, theme_name) VALUES ('empty', '空')",
     ).lastrowid
     db.commit()
 
@@ -332,30 +432,22 @@ def test_theme_constituents_are_empty_for_theme_without_targets(client, db):
     assert res.json() == []
 
 
-def _seed_theme(db, theme_key="ai", theme_name="AI", strategy_key="satellite"):
-    strategy = db.execute(
-        "SELECT strategy_id, strategy_name FROM strategy WHERE strategy_key = ?", (strategy_key,)
-    ).fetchone()
+def _seed_theme(db, theme_key="ai", theme_name="AI"):
     theme_id = db.execute(
-        "INSERT INTO theme (theme_key, theme_name, strategy_id, description) VALUES (?, ?, ?, ?)",
-        (theme_key, theme_name, strategy["strategy_id"], "仮説メモ"),
+        "INSERT INTO theme (theme_key, theme_name, description) VALUES (?, ?, ?)",
+        (theme_key, theme_name, "仮説メモ"),
     ).lastrowid
     db.commit()
-    return theme_id, strategy["strategy_name"]
+    return theme_id
 
 
-def test_theme_detail_includes_strategy_name(client, db):
-    """テーマ詳細は strategy のキーと表示名を含めて返す。
-
-    `strategy_id` だけだと、呼び出し側が strategy 一覧を別途取得して突き合わせる
-    必要が生じる。DBで1回JOINすれば済むため、API側で解決する。
-    """
-    theme_id, strategy_name = _seed_theme(db)
+def test_theme_detail_is_independent_of_strategy(client, db):
+    """テーマ詳細は旧strategy分類なしで取得できる。"""
+    theme_id = _seed_theme(db)
 
     body = client.get(f"/api/themes/{theme_id}").json()
 
-    assert body["strategy_key"] == "satellite"
-    assert body["strategy_name"] == strategy_name
+    assert "strategy_id" not in body
     assert body["description"] == "仮説メモ"
 
 
@@ -365,7 +457,7 @@ def test_theme_summary_and_detail_agree_on_types(client, db):
     `/summary` に response_model が無かった頃、`is_active` が一覧では整数、
     詳細では真偽値として返っていた。
     """
-    theme_id, _ = _seed_theme(db)
+    theme_id = _seed_theme(db)
 
     summary = next(
         row for row in client.get("/api/themes/summary").json() if row["theme_id"] == theme_id
@@ -374,8 +466,7 @@ def test_theme_summary_and_detail_agree_on_types(client, db):
 
     assert summary["is_active"] is True
     assert detail["is_active"] is True
-    assert summary["strategy_key"] == detail["strategy_key"]
-    assert summary["strategy_name"] == detail["strategy_name"]
+    assert summary["theme_name"] == detail["theme_name"]
 
 
 def test_theme_detail_returns_404_for_unknown_theme(client):
@@ -384,12 +475,8 @@ def test_theme_detail_returns_404_for_unknown_theme(client):
 
 
 def _seed_theme_and_target(db):
-    strategy_id = db.execute(
-        "SELECT strategy_id FROM strategy WHERE strategy_key = 'core'"
-    ).fetchone()[0]
     theme_id = db.execute(
-        "INSERT INTO theme (theme_key, theme_name, strategy_id) VALUES ('ai', 'AI', ?)",
-        (strategy_id,),
+        "INSERT INTO theme (theme_key, theme_name) VALUES ('ai', 'AI')",
     ).lastrowid
     target_id = db.execute(
         "INSERT INTO investment_target (target_key, target_name, target_type) "

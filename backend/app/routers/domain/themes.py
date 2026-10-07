@@ -1,12 +1,10 @@
 """
-テーマ / ストラテジー CRUD API
+テーマ CRUD API
 """
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import Connection, get_db
 from app.models.theme import (
-    StrategyCreate,
-    StrategyRead,
     ThemeCreate,
     ThemeDetailRead,
     ThemeRead,
@@ -31,7 +29,7 @@ def list_themes(is_active: bool | None = None, repo: ThemeRepository = Depends(_
 
 @router.get("/summary", response_model=list[ThemeSummaryRead])
 def theme_summary(repo: ThemeRepository = Depends(_repo)):
-    """有効なテーマを、所属strategyと構成銘柄数つきで返す。"""
+    """有効なテーマを構成銘柄数つきで返す。"""
     return repo.get_theme_summary()
 
 
@@ -58,23 +56,9 @@ def delete_theme(theme_id: int, repo: ThemeRepository = Depends(_repo)):
     repo.soft_delete(theme_id)
 
 
-# ---- Strategy (dynamic /{theme_id} routes must come after these) ----
-
-@router.get("/strategies/", response_model=list[StrategyRead])
-def list_strategies(repo: ThemeRepository = Depends(_repo)):
-    return repo.find_all_strategies()
-
-
-@router.post("/strategies/", response_model=StrategyRead, status_code=201)
-def create_strategy(body: StrategyCreate, repo: ThemeRepository = Depends(_repo)):
-    new_id = repo.create_strategy(body.model_dump())
-    rows = repo.execute_single("SELECT * FROM strategy WHERE strategy_id = ?", (new_id,))
-    return rows
-
-
 @router.get("/{theme_id}", response_model=ThemeDetailRead)
 def get_theme(theme_id: int, repo: ThemeRepository = Depends(_repo)):
-    """テーマ1件を、所属strategyのキーと表示名つきで返す。"""
+    """テーマ1件を返す。"""
     theme = repo.find_detail_by_id(theme_id)
     if not theme:
         raise HTTPException(status_code=404, detail="Theme not found")

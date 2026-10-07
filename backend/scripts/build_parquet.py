@@ -40,6 +40,14 @@ from app.database import connect_database
 from app.etl.normalizers import normalize_jquants_price
 from app.etl.raw_store import iter_raw
 
+# 出力先はリポジトリルートに固定する。`Path("data/parquet")` のようなカレント
+# ディレクトリ相対にすると、`cd backend` してから実行したときに
+# `backend/data/parquet/` へ出る。.gitignore の `data/parquet/` は途中にスラッシュが
+# あるためルートに固定されたパターンで、そちらには一致せず、63MBの派生物が
+# コミット候補に並んだ。明示的に `--out` を渡したときは、打った通りに解釈する。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUT = PROJECT_ROOT / "data" / "parquet"
+
 # J-Quantsコードは5桁で、末尾の0を落とすと内部のtarget_keyになる（72030 → 7203.T）。
 JQUANTS_SOURCE_KEY = "jquants"
 
@@ -49,12 +57,23 @@ PRICE_SCHEMA = pa.schema(
         ("jpx_code", pa.string()),
         ("source_key", pa.string()),
         ("obs_date", pa.date32()),
+        ("raw_open_price", pa.float64()),
+        ("raw_high_price", pa.float64()),
+        ("raw_low_price", pa.float64()),
+        ("raw_close_price", pa.float64()),
+        ("raw_volume", pa.float64()),
+        ("turnover_value", pa.float64()),
         ("open_price", pa.float64()),
         ("high_price", pa.float64()),
         ("low_price", pa.float64()),
         ("close_price", pa.float64()),
         ("volume", pa.float64()),
         ("price_basis", pa.string()),
+        ("adjustment_factor", pa.float64()),
+        ("market_cap_million_yen", pa.float64()),
+        ("ex_rights_type", pa.string()),
+        ("upper_limit_flag", pa.bool_()),
+        ("lower_limit_flag", pa.bool_()),
         ("ingestion_run_id", pa.int64()),
         ("built_at", pa.timestamp("us", tz="UTC")),
     ]
@@ -116,6 +135,14 @@ def build_yfinance_rows(
                 "jpx_code": jpx_code,
                 "source_key": "yfinance",
                 "obs_date": obs_date,
+                # yfinanceはauto_adjust済みの系列しかrawへ保存していない。未調整値や
+                # J-Quants互換の調整係数を推測して埋めない。
+                "raw_open_price": None,
+                "raw_high_price": None,
+                "raw_low_price": None,
+                "raw_close_price": None,
+                "raw_volume": None,
+                "turnover_value": None,
                 "open_price": record.get("open"),
                 "high_price": record.get("high"),
                 "low_price": record.get("low"),
@@ -123,6 +150,11 @@ def build_yfinance_rows(
                 "volume": record.get("volume"),
                 # yfinanceは auto_adjust=True で取得しているので調整済み。
                 "price_basis": "adjusted",
+                "adjustment_factor": None,
+                "market_cap_million_yen": None,
+                "ex_rights_type": None,
+                "upper_limit_flag": None,
+                "lower_limit_flag": None,
                 "ingestion_run_id": run_id,
                 "built_at": built_at,
             }
@@ -157,6 +189,12 @@ def build_price_rows(
                 "jpx_code": price.jpx_code,
                 "source_key": JQUANTS_SOURCE_KEY,
                 "obs_date": datetime.strptime(price.obs_date, "%Y-%m-%d").date(),
+                "raw_open_price": price.raw_open_price,
+                "raw_high_price": price.raw_high_price,
+                "raw_low_price": price.raw_low_price,
+                "raw_close_price": price.raw_close_price,
+                "raw_volume": price.raw_volume,
+                "turnover_value": price.turnover_value,
                 "open_price": price.open_price,
                 "high_price": price.high_price,
                 "low_price": price.low_price,
@@ -164,6 +202,11 @@ def build_price_rows(
                 "volume": price.volume,
                 # J-Quantsの Adj* は調整済み。未調整と混ぜないために明示する。
                 "price_basis": "adjusted",
+                "adjustment_factor": price.adjustment_factor,
+                "market_cap_million_yen": price.market_cap_million_yen,
+                "ex_rights_type": price.ex_rights_type,
+                "upper_limit_flag": price.upper_limit_flag,
+                "lower_limit_flag": price.lower_limit_flag,
                 "ingestion_run_id": run_id,
                 "built_at": built_at,
             }
@@ -238,8 +281,8 @@ def publish_parquet(local_dir: Path, destination: str) -> int:
 # 取込種別ごとの変換。rawの形が取得元で違うため、1つの関数で分岐させず対応表で持つ。
 PRICE_BUILDERS: dict[str, Callable[[list[dict[str, Any]], int], tuple[list[dict[str, Any]], int, int]]] = {
     "jquants_market_prices_archive_v1": build_price_rows,
-    # 銘柄単位でJ-Quantsから取る経路（`JQUANTS_DAILY_ENABLED=true` のときの
-    # `daily_update.py`、および `jquants_sync.py prices`）。rawの形は全市場アーカイブと
+    # 銘柄単位でJ-Quantsから取る経路（`daily_update.py` および `jquants_sync.py prices`）。
+    # rawの形は全市場アーカイブと
     # 同じで、同じエンドポイント・同じ正規化関数を通る。
     #
     # **ここに載せないとrawが分析層へ届かない。** 価格はParquetからしか読まないので、
@@ -253,7 +296,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="rawレスポンスから分析用Parquetを組み立てる（rawが原本、Parquetは派生）"
     )
-    parser.add_argument("--out", type=Path, default=Path("data/parquet"))
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument(
         "--job-type",
         action="append",
@@ -275,7 +318,7 @@ def main() -> int:
     if args.publish and not args.publish.startswith("gs://"):
         parser.error("--publish は gs:// で始まるURIを指定してください")
 
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = PROJECT_ROOT
     job_types = args.job_types or list(PRICE_BUILDERS)
     all_rows: list[dict[str, Any]] = []
     skipped_total = 0

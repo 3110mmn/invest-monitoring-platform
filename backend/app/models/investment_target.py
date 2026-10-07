@@ -1,6 +1,7 @@
 """Pydantic スキーマ — investment_target / market_price_observation"""
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -25,11 +26,13 @@ class InvestmentTargetUpdate(BaseModel):
     market: str | None = None
     currency: str | None = None
     is_monitored: bool | None = None
+    watchlist_status: Literal["considering", "monitoring", "paused"] | None = None
 
 
 class InvestmentTargetRead(InvestmentTargetBase):
     target_id: int
     is_monitored: bool
+    watchlist_status: Literal["considering", "monitoring", "paused"] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -39,7 +42,7 @@ class InvestmentTargetRead(InvestmentTargetBase):
 class MarketPriceRead(BaseModel):
     # log_id / fetched_at / note / created_at は持たない。分析層のParquetには無く、
     # フロントも参照していない。読み出し元によって形が変わらないようにする。
-    target_id: int
+    target_id: int | None
     source_key: str
     ingestion_run_id: int | None = None
     obs_date: date

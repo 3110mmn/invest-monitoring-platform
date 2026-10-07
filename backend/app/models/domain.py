@@ -10,7 +10,6 @@ class Theme:
     theme_id: int
     theme_key: str
     theme_name: str
-    strategy_id: int
     description: str | None = None
     is_active: bool = True
 

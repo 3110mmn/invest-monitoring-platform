@@ -62,7 +62,7 @@ def test_migration_context_is_allowed(tmp_path):
     path = _write(
         tmp_path,
         "a.md",
-        "| `LEGACY_SQLITE_PATH` | 一度限りのSQLite移行元 |\n旧SQLiteの PRAGMA 設定は引き継がない。\n",
+        "GCS SQLite から移行した。PRAGMA 設定は引き継がない。\n",
     )
 
     assert forbidden_terms(path) == []

@@ -201,6 +201,10 @@ def test_api_serves_parquet_prices_in_the_same_shape(client, db, parquet_source,
         "INSERT INTO investment_target (target_key, target_name, target_type) "
         "VALUES ('7203.T', 'トヨタ', 'individual_stock')"
     ).lastrowid
+    db.execute(
+        "INSERT INTO watchlist_entry (target_id, status) VALUES (?, 'monitoring')",
+        (target_id,),
+    )
     db.commit()
     source = parquet_source([_row(0, 300.0), _row(1, 200.0)])
     monkeypatch.setattr(

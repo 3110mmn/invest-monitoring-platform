@@ -25,32 +25,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from build_financial_parquet import build_schema
 from build_parquet import PRICE_SCHEMA
+from build_security_master import SECURITY_MASTER_SCHEMA
 
 # Databases this suite is allowed to truncate. Development (`invest`) and production
 # (`neondb`) are excluded on purpose; there is no option to override this.
 TEST_DATABASE_NAMES = frozenset({"invest_test"})
 
 _TABLES = (
+    "capital_budget_version",
+    "mandate_target_assignment",
+    "mandate_version",
+    "capital_allocation_mandate",
     "theme_investment_target",
+    "watchlist_entry",
     "investment_target_identifier",
     "ingestion_error",
     "ingestion_run",
     "data_source",
     "investment_target",
     "theme",
-    "strategy",
 )
 
 
 def _reset_database(conn: Connection) -> None:
     conn.execute(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE")
-    conn.execute("""
-        INSERT INTO strategy (strategy_key, strategy_name, description)
-        VALUES
-            ('core', 'Core', '中核となる長期保有戦略'),
-            ('satellite', 'Satellite', '成長機会を取り込む補完戦略'),
-            ('alternatives', 'Alternatives', '伝統資産以外の分散戦略')
-    """)
     conn.commit()
 
 
@@ -99,6 +97,7 @@ def analytics_lake(tmp_path_factory) -> str:
     for subpath, schema in (
         ("observed/market_price", PRICE_SCHEMA),
         ("observed/financial_summary", build_schema()),
+        ("reference/security_master", SECURITY_MASTER_SCHEMA),
     ):
         partition = lake / subpath / "year=2026"
         partition.mkdir(parents=True)

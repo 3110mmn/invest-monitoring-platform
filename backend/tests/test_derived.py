@@ -17,13 +17,16 @@ from analytics import runner
 from analytics.runner import (
     _ensure_ca_bundle,
     connect,
+    connect_lake,
     load_definition,
     run,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+from build_financial_parquet import build_schema as build_financial_schema
 from build_parquet import PRICE_SCHEMA
+from build_security_master import SECURITY_MASTER_SCHEMA
 
 
 def _write_prices(tmp_path, rows: list[dict]) -> str:
@@ -40,7 +43,14 @@ def _write_prices(tmp_path, rows: list[dict]) -> str:
 
 
 def _price(
-    day: int, close: float | None, *, code="72030", basis="adjusted", source="jquants"
+    day: int,
+    close: float | None,
+    *,
+    code="72030",
+    basis="adjusted",
+    source="jquants",
+    raw_close: float | None = None,
+    adjustment_factor: float | None = 1.0,
 ) -> dict:
     """1行ぶんの観測。検証に関係しない列は既定値で埋める。"""
     return {
@@ -48,12 +58,14 @@ def _price(
         "jpx_code": code,
         "source_key": source,
         "obs_date": date(2026, 7, day),
+        "raw_close_price": close if raw_close is None else raw_close,
         "open_price": close,
         "high_price": close,
         "low_price": close,
         "close_price": close,
         "volume": 1000.0,
         "price_basis": basis,
+        "adjustment_factor": adjustment_factor,
         "ingestion_run_id": 1,
         "built_at": datetime(2026, 7, 1, tzinfo=UTC),
     }
@@ -67,6 +79,59 @@ def _returns(tmp_path, rows) -> list[dict]:
     """
     glob = _write_prices(tmp_path, rows)
     relation = run("daily_return", parquet_glob=glob).order("obs_date")
+    names = relation.columns
+    return [dict(zip(names, row, strict=True)) for row in relation.fetchall()]
+
+
+def _write_financials(tmp_path, rows: list[dict]) -> None:
+    schema = build_financial_schema()
+    target = tmp_path / "observed" / "financial_summary" / "year=2026"
+    target.mkdir(parents=True)
+    complete = [{name: row.get(name) for name in schema.names} for row in rows]
+    pq.write_table(pa.Table.from_pylist(complete, schema=schema), target / "part-0.parquet")
+
+
+def _financial(
+    disclosed_day: int,
+    bps: float | None,
+    *,
+    period_end_day: int = 1,
+    number: str = "1",
+    scope: str = "consolidated",
+) -> dict:
+    return {
+        "jpx_code": "72030",
+        "target_key": "7203.T",
+        "source_key": "jquants",
+        "disclosure_number": number,
+        "disclosed_date": date(2026, 7, disclosed_day),
+        "disclosed_time": "15:00:00",
+        "document_type": "FYFinancialStatements_Consolidated_JP",
+        "fiscal_period_type": "FY",
+        "period_start": date(2025, 7, 1),
+        "period_end": date(2026, 7, period_end_day),
+        "fiscal_year_start": date(2025, 7, 1),
+        "fiscal_year_end": date(2026, 7, period_end_day),
+        "accounting_standard": "JP",
+        "reporting_scope": scope,
+        "bps": bps,
+        "source_record_hash": number,
+        "ingestion_run_id": int(number),
+        "built_at": datetime(2026, 7, disclosed_day, tzinfo=UTC),
+    }
+
+
+def _pbr_rows(tmp_path, prices: list[dict], financials: list[dict]) -> list[dict]:
+    _write_prices(tmp_path, prices)
+    _write_financials(tmp_path, financials)
+    master = tmp_path / "reference" / "security_master"
+    master.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([], schema=SECURITY_MASTER_SCHEMA),
+        master / "part-0.parquet",
+    )
+    connection = connect_lake(str(tmp_path))
+    relation = run("point_in_time_pbr", connection=connection).order("as_of_date")
     names = relation.columns
     return [dict(zip(names, row, strict=True)) for row in relation.fetchall()]
 
@@ -172,6 +237,80 @@ def test_duplicate_sources_do_not_double_count_in_the_window(tmp_path):
 
     assert len(rows) == 2
     assert rows[1]["daily_return"] == pytest.approx(0.10)
+
+
+def test_point_in_time_pbr_uses_only_previously_disclosed_financials(tmp_path):
+    """同日開示は混ぜず、翌取引日から使う。未来情報による先読みを防ぐ。"""
+    rows = _pbr_rows(
+        tmp_path,
+        [_price(1, 100.0), _price(2, 90.0), _price(3, 80.0)],
+        [_financial(2, 100.0)],
+    )
+
+    assert rows[1]["calculation_status"] == "financial_not_available"
+    assert rows[1]["pbr"] is None
+    assert rows[2]["pbr"] == pytest.approx(0.8)
+    assert rows[2]["is_below_book_value"] is True
+
+
+def test_point_in_time_pbr_aligns_bps_after_a_stock_split(tmp_path):
+    """1:2分割後はBPSを半分にし、未調整終値と同じ株数基準でPBRを出す。"""
+    rows = _pbr_rows(
+        tmp_path,
+        [
+            _price(1, 100.0, raw_close=100.0),
+            _price(2, 100.0, raw_close=100.0),
+            _price(3, 60.0, raw_close=60.0, adjustment_factor=0.5),
+        ],
+        [_financial(2, 100.0)],
+    )
+
+    latest = rows[-1]
+    assert latest["bps_adjustment_factor"] == pytest.approx(0.5)
+    assert latest["adjusted_bps"] == pytest.approx(50.0)
+    assert latest["pbr"] == pytest.approx(1.2)
+    assert latest["is_below_book_value"] is False
+
+
+def test_point_in_time_pbr_does_not_treat_non_positive_bps_as_value(tmp_path):
+    rows = _pbr_rows(
+        tmp_path,
+        [_price(1, 100.0), _price(2, 90.0), _price(3, 80.0)],
+        [_financial(2, -10.0)],
+    )
+
+    assert rows[-1]["calculation_status"] == "non_positive_bps"
+    assert rows[-1]["pbr"] is None
+    assert rows[-1]["is_below_book_value"] is None
+
+
+def test_point_in_time_pbr_prefers_consolidated_on_the_same_day(tmp_path):
+    rows = _pbr_rows(
+        tmp_path,
+        [_price(1, 100.0), _price(2, 90.0), _price(3, 80.0)],
+        [
+            _financial(2, 50.0, number="1", scope="non_consolidated"),
+            _financial(2, 100.0, number="2", scope="consolidated"),
+        ],
+    )
+
+    assert rows[-1]["reporting_scope"] == "consolidated"
+    assert rows[-1]["pbr"] == pytest.approx(0.8)
+
+
+def test_point_in_time_pbr_reports_missing_adjustment_data(tmp_path):
+    rows = _pbr_rows(
+        tmp_path,
+        [
+            _price(1, 100.0),
+            _price(2, 90.0),
+            _price(3, 80.0, adjustment_factor=None),
+        ],
+        [_financial(2, 100.0)],
+    )
+
+    assert rows[-1]["calculation_status"] == "invalid_adjustment_factor"
+    assert rows[-1]["pbr"] is None
 
 
 def test_local_glob_does_not_require_gcs_dependencies(tmp_path, monkeypatch):

@@ -22,7 +22,7 @@ env:
   ARTIFACT_REPOSITORY: invest-monitoring
   CLOUD_RUN_SERVICE: invest-monitoring-public-api
   FRONTEND_SERVICE: invest-monitoring-frontend
-  DATABASE_SECRET: invest-database-reader-url
+  DATABASE_SECRET: invest-demo-database-writer-url
   RUNTIME_SERVICE_ACCOUNT: invest-public-api-runtime@invest-dwh.iam.gserviceaccount.com
   # 価格と財務は分析層からしか読まない。公開デモはsyntheticなParquetを読む。
   # このサービスアカウントは実データのバケットに権限を持たないため、宛先を
@@ -68,7 +68,14 @@ jobs:
           docker push "${image}"
           echo "IMAGE=${image}" >> "${GITHUB_ENV}"
 
-      - name: Deploy read-only API
+      # **max-instances は1のまま保つ。** 公開デモの書き込みレート制限はプロセス内の
+      # 辞書（main.py の _public_demo_rate_windows）で数えるため、インスタンスが増えると
+      # 1IPあたりの実効上限がその数だけ増える。
+      #
+      # 有効な投資枠数と1枠あたりの割当数は pg_advisory_xact_lock で直列化しているので
+      # インスタンス数に依存しない（40件同時POSTでちょうど20件だけ通ることを確認済み）。
+      # インスタンス数に依存するのはレート制限だけである。
+      - name: Deploy API with disposable public-demo writes
         shell: bash
         run: |
           set -euo pipefail
@@ -80,7 +87,7 @@ jobs:
             --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
             --port 8080 \
             --allow-unauthenticated \
-            --set-env-vars "DATABASE_READ_ONLY=true,MANAGEMENT_API_ENABLED=false,PARQUET_LAKE=${DEMO_PARQUET_LAKE}" \
+            --set-env-vars "DATABASE_READ_ONLY=false,DATABASE_ENVIRONMENT_OVERRIDE=demo,PUBLIC_DEMO_WRITE_ENABLED=true,MANAGEMENT_API_ENABLED=false,PARQUET_LAKE=${DEMO_PARQUET_LAKE}" \
             --set-secrets "DATABASE_URL=${DATABASE_SECRET}:latest" \
             --min-instances 0 \
             --max-instances 1 \

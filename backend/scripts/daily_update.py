@@ -128,8 +128,17 @@ def update_investment_target_prices(since: date | None = None) -> None:
     targets = [
         (str(row["target_key"]), str(row["target_name"]))
         for row in conn.execute(
-            "SELECT target_key, target_name FROM investment_target "
-            "WHERE is_monitored = TRUE ORDER BY target_id"
+            """SELECT t.target_key, t.target_name FROM investment_target t
+               WHERE EXISTS (SELECT 1 FROM watchlist_entry w
+                             WHERE w.target_id = t.target_id AND w.status = 'monitoring')
+                  OR EXISTS (
+                      SELECT 1 FROM mandate_target_assignment a
+                      JOIN mandate_version v ON v.mandate_version_id = a.mandate_version_id
+                      JOIN capital_allocation_mandate m ON m.mandate_id = v.mandate_id
+                      WHERE a.target_id = t.target_id AND a.status = 'active'
+                        AND v.effective_until IS NULL AND m.status = 'active'
+                  )
+               ORDER BY t.target_id"""
         ).fetchall()
     ]
     print(f"\n=== 価格取得 ({len(targets)}件) ===\n")

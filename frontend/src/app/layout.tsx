@@ -11,8 +11,9 @@ export const metadata: Metadata = {
 
 const NAV = [
   { href: "/", label: "ダッシュボード" },
+  { href: "/mandates", label: "投資枠" },
+  { href: "/investment-targets", label: "ウォッチリスト" },
   { href: "/themes", label: "テーマ" },
-  { href: "/investment-targets", label: "投資対象" },
   ...(!PUBLIC_READ_ONLY ? [{ href: "/settings", label: "設定" }] : []),
 ];
 

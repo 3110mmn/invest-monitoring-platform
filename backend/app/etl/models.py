@@ -15,11 +15,22 @@ class InvestmentTargetMasterRecord:
 class PriceRecord:
     jpx_code: str
     obs_date: str
+    raw_open_price: float | None
+    raw_high_price: float | None
+    raw_low_price: float | None
+    raw_close_price: float | None
+    raw_volume: float | None
+    turnover_value: float | None
     open_price: float | None
     high_price: float | None
     low_price: float | None
     close_price: float | None
     volume: float | None
+    adjustment_factor: float | None
+    market_cap_million_yen: float | None
+    ex_rights_type: str | None
+    upper_limit_flag: bool | None
+    lower_limit_flag: bool | None
 
 
 @dataclass(frozen=True)

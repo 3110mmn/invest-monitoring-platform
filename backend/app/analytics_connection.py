@@ -78,6 +78,7 @@ def open_analytics_connection() -> duckdb.DuckDBPyConnection | None:
     from analytics.runner import (
         FINANCIAL_DISCLOSURE_VIEW,
         PREFERRED_PRICE_VIEW,
+        SECURITY_MASTER_VIEW,
         connect_lake,
     )
 
@@ -87,6 +88,7 @@ def open_analytics_connection() -> duckdb.DuckDBPyConnection | None:
         # 両方を触るのは、片方だけ所在が違っていても起動時に気づけるようにするため。
         prices = connection.execute(f"SELECT COUNT(*) FROM {PREFERRED_PRICE_VIEW}").fetchone()
         disclosures = connection.execute(f"SELECT COUNT(*) FROM {FINANCIAL_DISCLOSURE_VIEW}").fetchone()
+        securities = connection.execute(f"SELECT COUNT(*) FROM {SECURITY_MASTER_VIEW}").fetchone()
     except Exception:
         logger.exception(
             "分析層へ接続できません: %s。価格と財務は503になります",
@@ -96,10 +98,11 @@ def open_analytics_connection() -> duckdb.DuckDBPyConnection | None:
 
     _connection = connection
     logger.info(
-        "分析層へ接続しました: %s（価格%s行 / 開示%s行）",
+        "分析層へ接続しました: %s（価格%s行 / 開示%s行 / 銘柄%s行）",
         settings.parquet_lake,
         f"{prices[0]:,}" if prices else "不明",
         f"{disclosures[0]:,}" if disclosures else "不明",
+        f"{securities[0]:,}" if securities else "不明",
     )
     return _connection
 

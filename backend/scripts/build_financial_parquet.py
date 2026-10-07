@@ -44,6 +44,14 @@ from app.etl.normalizers import (
 )
 from app.etl.raw_store import iter_raw
 
+# 出力先はリポジトリルートに固定する。`Path("data/parquet")` のようなカレント
+# ディレクトリ相対にすると、`cd backend` してから実行したときに
+# `backend/data/parquet/` へ出る。.gitignore の `data/parquet/` は途中にスラッシュが
+# あるためルートに固定されたパターンで、そちらには一致せず、63MBの派生物が
+# コミット候補に並んだ。明示的に `--out` を渡したときは、打った通りに解釈する。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUT = PROJECT_ROOT / "data" / "parquet"
+
 JQUANTS_SOURCE_KEY = "jquants"
 
 # 開示そのものを表す列。`values` に入らないメタデータ。
@@ -203,7 +211,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="財務サマリーのrawから分析用Parquetを組み立てる"
     )
-    parser.add_argument("--out", type=Path, default=Path("data/parquet"))
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--job-type", default="jquants_financial_archive_v1")
     parser.add_argument("--publish", metavar="GS_URI", help="出力後にGCSへ同期する")
     parser.add_argument(
@@ -217,7 +225,7 @@ def main() -> int:
         parser.error("--publish は gs:// で始まるURIを指定してください")
 
     schema = build_schema()
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = PROJECT_ROOT
     all_rows: list[dict[str, Any]] = []
     skipped_total = unmapped_total = files = remote = 0
 

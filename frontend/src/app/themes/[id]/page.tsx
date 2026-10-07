@@ -9,23 +9,8 @@ import {
   addThemeInvestmentTarget,
 } from "@/lib/api";
 import { PUBLIC_READ_ONLY } from "@/lib/runtime";
+import { INVESTMENT_TARGET_TYPE_LABELS } from "@/types";
 import type { InvestmentTarget, ThemeConstituent, ThemeDetail } from "@/types";
-
-const STRATEGY_COLORS: Record<string, string> = {
-  core: "bg-blue-100 text-blue-800",
-  satellite: "bg-green-100 text-green-800",
-  alternatives: "bg-purple-100 text-purple-800",
-};
-
-const TARGET_TYPE_LABELS: Record<string, string> = {
-  individual_stock: "個別株",
-  etf: "ETF",
-  mutual_fund: "投資信託",
-  reit: "REIT",
-  bond: "債券",
-  index: "指数",
-  commodity: "商品",
-};
 
 export default function ThemeDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const themeId = Number(use(params).id);
@@ -87,13 +72,6 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
         </Link>
         <div className="flex items-center gap-3 mt-1">
           <h1 className="text-2xl font-bold">{theme.theme_name}</h1>
-          <span
-            className={`text-xs px-2 py-0.5 rounded font-bold ${
-              STRATEGY_COLORS[theme.strategy_key] ?? ""
-            }`}
-          >
-            {theme.strategy_name}
-          </span>
           {!theme.is_active && (
             <span className="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-700">停止中</span>
           )}
@@ -143,7 +121,7 @@ export default function ThemeDetailPage({ params }: { params: Promise<{ id: stri
                       <span className="text-gray-500 font-mono ml-2">{c.target_key}</span>
                     </td>
                     <td className="px-3 py-2">
-                      {c.target_type ? TARGET_TYPE_LABELS[c.target_type] ?? c.target_type : "—"}
+                      {c.target_type ? INVESTMENT_TARGET_TYPE_LABELS[c.target_type] : "—"}
                     </td>
                     <td className="px-3 py-2 text-gray-600">
                       {new Date(c.effective_from).toLocaleDateString("ja-JP")}

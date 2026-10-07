@@ -37,10 +37,6 @@ FORBIDDEN_TERMS: dict[str, str] = {
 
 # 移行の経緯として言及してよい文脈。行内にこれを含むなら見逃す。
 ALLOWED_CONTEXT = (
-    "LEGACY_SQLITE_PATH",
-    "旧SQLite",
-    "db-import",
-    "SQLiteからPostgreSQL",
     "GCS SQLite",
 )
 

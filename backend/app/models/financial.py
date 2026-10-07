@@ -47,7 +47,7 @@ class FinancialDisclosureRead(FinancialSummaryValues):
 
     # `disclosure_id` は持たない。PostgreSQLのsurrogate keyで、分析層には無い。
     # 開示の同一性は `disclosure_number` が表す。
-    target_id: int
+    target_id: int | None
     source_key: str
     disclosure_number: str
     disclosed_date: date
@@ -76,7 +76,7 @@ class LatestFinancialRead(BaseModel):
     **実績値の参照には `latest_actual` を使うこと。**
     """
 
-    target_id: int
+    target_id: int | None
     latest_disclosure: FinancialDisclosureRead
     latest_actual: FinancialDisclosureRead | None = None
     current_forecast: FinancialDisclosureRead | None = None

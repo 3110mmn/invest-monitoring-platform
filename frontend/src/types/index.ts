@@ -4,35 +4,31 @@ export type InvestmentTargetType =
   | "individual_stock"
   | "etf"
   | "mutual_fund"
-  | "reit"
-  | "bond"
-  | "index"
-  | "commodity";
+  | "bond";
+
+export const INVESTMENT_TARGET_TYPE_LABELS: Record<InvestmentTargetType, string> = {
+  individual_stock: "個別株",
+  etf: "ETF",
+  mutual_fund: "投資信託",
+  bond: "債券",
+};
 
 export interface Theme {
   theme_id: number;
   theme_key: string;
   theme_name: string;
-  strategy_id: number;
   description: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
 }
 
-/** テーマ1件。所属strategyのキーと表示名を含む */
-export interface ThemeDetail extends Theme {
-  strategy_key: string;
-  strategy_name: string;
-}
+export type ThemeDetail = Theme;
 
 export interface ThemeSummary {
   theme_id: number;
   theme_key: string;
   theme_name: string;
-  strategy_id: number;
-  strategy_key: string;
-  strategy_name: string;
   target_count: number;
   is_active: boolean;
 }
@@ -45,6 +41,7 @@ export interface InvestmentTarget {
   market: string | null;
   currency: string | null;
   is_monitored: boolean;
+  watchlist_status: "considering" | "monitoring" | "paused" | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,18 +52,75 @@ export interface ThemeConstituent extends InvestmentTarget {
   effective_from: string;
 }
 
-export interface Strategy {
-  strategy_id: number;
-  strategy_key: string;
-  strategy_name: string;
-  description: string | null;
-  is_active: boolean;
+export type MandateStatus = "draft" | "active" | "suspended" | "retired";
+export type ReviewCycle = "monthly" | "quarterly" | "semiannual" | "annual" | "ad_hoc" | "other";
+
+export interface MandateTargetAssignment {
+  assignment_id: number;
+  target_id: number;
+  target_key: string;
+  target_name: string;
+  target_type: InvestmentTargetType | null;
+  status: MandateStatus;
+  target_weight: number | null;
+  target_amount: string | null;
+  minimum_weight: number | null;
+  maximum_weight: number | null;
+  rationale: string | null;
+}
+
+export interface CapitalAllocationMandate {
+  mandate_id: number;
+  mandate_key: string;
+  mandate_name: string;
+  status: MandateStatus;
+  mandate_version_id: number;
+  version_no: number;
+  purpose: string;
+  allocation_weight: number | null;
+  budget_amount: string | null;
+  currency: string | null;
+  expected_return: number | null;
+  max_drawdown: number | null;
+  horizon_months: number | null;
+  benchmark_target_id: number | null;
+  benchmark_target_key: string | null;
+  benchmark_target_name: string | null;
+  review_cycle: ReviewCycle | null;
+  review_cycle_custom: string | null;
+  next_review_at: string | null;
+  effective_from: string;
+  effective_until: string | null;
+  change_reason: string | null;
+  allocated_weight: number;
+  unallocated_weight: number | null;
   created_at: string;
   updated_at: string;
+  demo_expires_at: string | null;
+}
+
+export interface CapitalBudget {
+  capital_budget_version_id: number;
+  version_no: number;
+  total_budget: string;
+  currency: string;
+  effective_from: string;
+  effective_until: string | null;
+  change_reason: string;
+}
+
+export interface MandateReviewItem {
+  mandate_id: number;
+  mandate_name: string;
+  next_review_at: string;
+}
+
+export interface MandateDetail extends CapitalAllocationMandate {
+  assignments: MandateTargetAssignment[];
 }
 
 export interface MarketPrice {
-  target_id: number;
+  target_id: number | null;
   source_key: string;
   obs_date: string;
   open_price: number | null;
@@ -88,7 +142,7 @@ export interface MarketPrice {
 export interface FinancialDisclosure {
   // disclosure_id は持たない。PostgreSQL の surrogate key で、分析層には無い。
   // 開示の同一性は disclosure_number が表す。
-  target_id: number;
+  target_id: number | null;
   source_key: string;
   disclosure_number: string;
   disclosed_date: string;
@@ -121,7 +175,7 @@ export interface FinancialDisclosure {
 
 /** 最新の実績と各予想。出所の開示が異なりうるため開示ごと返る。 */
 export interface LatestFinancial {
-  target_id: number;
+  target_id: number | null;
   /** 種別を問わない最新の開示。最終更新日の表示に使う */
   latest_disclosure: FinancialDisclosure;
   /** 実績を含む直近の開示。実績値の参照にはこちらを使う */
@@ -129,6 +183,23 @@ export interface LatestFinancial {
   current_forecast: FinancialDisclosure | null;
   next_forecast: FinancialDisclosure | null;
   dividend_forecast: FinancialDisclosure | null;
+}
+
+export interface Security {
+  security_key: string;
+  jpx_code: string;
+  target_key: string | null;
+  company_name: string;
+  company_name_english: string | null;
+  market_code: string | null;
+  market_name: string | null;
+  sector_17_code: string | null;
+  sector_17_name: string | null;
+  sector_33_code: string | null;
+  sector_33_name: string | null;
+  scale_category: string | null;
+  target_id: number | null;
+  is_watchlisted: boolean;
 }
 
 export interface FinancialOverview {

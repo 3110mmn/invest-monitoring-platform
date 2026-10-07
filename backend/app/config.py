@@ -3,6 +3,7 @@
 pydantic-settings で .env を読み込む
 """
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings
@@ -12,8 +13,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://invest:invest@localhost:5432/invest"
-    # SQLiteからの一度限りの移行元。通常のAPI・ETLは参照しない。
-    legacy_sqlite_path: str = "data/invest.db"
+    database_environment_override: Literal["development", "test", "demo", "production"] | None = None
     # 公開APIではPostgreSQLセッションとHTTP変更操作を読み取り専用にする。
     database_read_only: bool = False
     backfill_years: int = 5
@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     raw_data_uri: str | None = None
     management_api_enabled: bool = False
     management_api_key: str | None = None
+    # 一般公開デモでのみ、期限付き投資枠の作成・更新を許可する。
+    public_demo_write_enabled: bool = False
+    public_demo_mandate_ttl_hours: int = 1
+    public_demo_max_active_mandates: int = 20
+    public_demo_max_assignments_per_mandate: int = 20
+    public_demo_writes_per_minute: int = 20
 
     # .env はカレントディレクトリではなくプロジェクトルート基準で探す。
     # 実行場所（リポジトリルート / backend / CI）によって読めたり読めなかったりするのを避ける。
@@ -57,6 +63,8 @@ class Settings(BaseSettings):
         実データを開発DBだと思って編集する事故が起きる。接続先を画面へ出せるように、
         接続文字列そのものではなく分類だけを公開する。
         """
+        if self.database_environment_override is not None:
+            return self.database_environment_override
         parsed = urlparse(self.database_url)
         host = parsed.hostname or ""
         database = (parsed.path or "").lstrip("/")
@@ -68,18 +76,8 @@ class Settings(BaseSettings):
         return "production"
 
     @property
-    def legacy_db_path(self) -> Path:
-        """移行元SQLiteの絶対パスを返す。"""
-        p = Path(self.legacy_sqlite_path)
-        if p.is_absolute():
-            return p
-        # .env の相対パスはプロジェクトルート基準
-        return Path(__file__).parent.parent.parent / p
-
-    @property
-    def db_path(self) -> Path:
-        """旧SQLite migration専用の互換alias。新規コードでは使わない。"""
-        return self.legacy_db_path
+    def database_username(self) -> str | None:
+        return urlparse(self.database_url).username
 
     @property
     def daily_update_script(self) -> Path:

@@ -25,6 +25,25 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _optional_flag(value: Any) -> bool | None:
+    """J-Quantsの`0`/`1`フラグをbooleanへ変換する。未知値を真扱いしない。"""
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if text == "0":
+        return False
+    if text == "1":
+        return True
+    raise ValueError(f"unknown flag value: {value!r}")
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def normalize_date(value: Any) -> str:
     text = str(value).strip()
     parsed = date.fromisoformat(text)
@@ -68,11 +87,24 @@ def normalize_jquants_price(row: dict[str, Any]) -> PriceRecord:
     return PriceRecord(
         jpx_code=str(row["Code"]).strip(),
         obs_date=normalize_date(row["Date"]),
+        raw_open_price=_optional_float(row.get("O")),
+        raw_high_price=_optional_float(row.get("H")),
+        raw_low_price=_optional_float(row.get("L")),
+        # PBRのような1株指標では、株式分割前後で価格とBPSの株数基準を合わせるために
+        # 未調整終値と日次調整係数が必要になる。リターン表示は従来どおりAdj*を使う。
+        raw_close_price=_optional_float(row.get("C")),
+        raw_volume=_optional_float(row.get("Vo")),
+        turnover_value=_optional_float(row.get("Va")),
         open_price=_optional_float(row.get("AdjO")),
         high_price=_optional_float(row.get("AdjH")),
         low_price=_optional_float(row.get("AdjL")),
         close_price=_optional_float(row.get("AdjC")),
         volume=_optional_float(row.get("AdjVo")),
+        adjustment_factor=_optional_float(row.get("AdjFactor")),
+        market_cap_million_yen=_optional_float(row.get("MktCap")),
+        ex_rights_type=_optional_string(row.get("ExRT")),
+        upper_limit_flag=_optional_flag(row.get("UL")),
+        lower_limit_flag=_optional_flag(row.get("LL")),
     )
 
 

@@ -4,8 +4,8 @@ from app.repositories.theme_repository import ThemeRepository
 
 def test_theme_repository_filters_active_rows(db):
     repo = ThemeRepository(db)
-    active_id = repo.create({"theme_key": "active", "theme_name": "Active", "strategy_id": 1})
-    inactive_id = repo.create({"theme_key": "inactive", "theme_name": "Inactive", "strategy_id": 1})
+    active_id = repo.create({"theme_key": "active", "theme_name": "Active"})
+    inactive_id = repo.create({"theme_key": "inactive", "theme_name": "Inactive"})
     repo.soft_delete(inactive_id)
 
     assert [row["theme_id"] for row in repo.find_all(is_active=True)] == [active_id]

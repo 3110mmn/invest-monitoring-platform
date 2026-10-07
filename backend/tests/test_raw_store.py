@@ -192,3 +192,45 @@ def test_without_after_run_id_everything_is_read(db, source_id):
     _insert_run(db, source_id, "job", "succeeded", "data/raw/run-2.json.gz")
 
     assert len(find_raw_locations(db, "job")) == 2
+
+
+def test_raw_lost_before_publication_does_not_block_reads(db, source_id, tmp_path, capsys):
+    """公開前に失われたrawは除外する。1件の消失が以後のビルドを止めないようにする。
+
+    2026-10-06の日次更新で、アーカイブは取得に成功したのに後続ステップが落ちてraw公開が
+    スキップされ、5ファイルがランナーごと消えた。その状態で差分Parquetビルドを回すと
+    読めないファイルで落ち、消失が解消されない限り永久にビルドできなくなっていた。
+    """
+    _stage(tmp_path, "run-2.json.gz")
+    _insert_run(db, source_id, "job", "succeeded", "run-1.json.gz")  # 実体が無い
+    _insert_run(db, source_id, "job", "succeeded", "run-2.json.gz")
+
+    results = list(iter_raw(db, "job", project_root=tmp_path))
+
+    assert [location.raw_path for location, _ in results] == ["run-2.json.gz"]
+    assert "公開前に失われたraw" in capsys.readouterr().out, (
+        "黙って飛ばすと、原本が失われたことに気づけない"
+    )
+
+
+def test_published_raw_is_kept_even_when_absent_locally(db, source_id, tmp_path):
+    """`gs://` を指すrawは手元に無くても除外しない。
+
+    GCSが正でローカルはキャッシュである。公開済みのオブジェクトが読めないのは保管の
+    破損であり、黙って飛ばしてはいけない。読み出しの失敗として大きな音を立てる。
+    """
+    _insert_run(db, source_id, "job", "succeeded", "gs://bucket/raw/run-1.json.gz")
+
+    locations = find_raw_locations(db, "job", project_root=tmp_path)
+
+    assert [loc.raw_path for loc in locations] == ["gs://bucket/raw/run-1.json.gz"]
+
+
+def test_lost_raw_is_only_dropped_when_asked(db, source_id, tmp_path):
+    """`project_root` を渡さない呼び出しの振る舞いは変えない。
+
+    所在の索引を引くだけの用途では、filesystemを見に行かない。
+    """
+    _insert_run(db, source_id, "job", "succeeded", "run-1.json.gz")
+
+    assert len(find_raw_locations(db, "job")) == 1

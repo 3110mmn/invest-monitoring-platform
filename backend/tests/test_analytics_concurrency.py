@@ -31,6 +31,7 @@ from build_financial_parquet import (
     write_year_partitions,
 )
 from build_parquet import PRICE_SCHEMA
+from build_security_master import SECURITY_MASTER_SCHEMA
 
 TARGET = {"target_id": 1, "target_key": "8697.T", "target_name": "JPX"}
 
@@ -71,6 +72,12 @@ def lake(tmp_path) -> str:
     )
     rows, _, _ = build_financial_rows([_RAW_DISCLOSURE], 1, schema)
     write_year_partitions(rows, tmp_path / "observed" / "financial_summary", schema)
+    master = tmp_path / "reference" / "security_master"
+    master.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([], schema=SECURITY_MASTER_SCHEMA),
+        master / "part-0.parquet",
+    )
     return str(tmp_path)
 
 

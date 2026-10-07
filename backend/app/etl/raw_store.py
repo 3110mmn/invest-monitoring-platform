@@ -40,12 +40,53 @@ class RawLocation:
         return self.raw_path.startswith(GCS_SCHEME)
 
 
+def _resolve_local(raw_path: str, project_root: Path) -> Path:
+    path = Path(raw_path)
+    return path if path.is_absolute() else project_root / path
+
+
+def _drop_raw_lost_before_publication(
+    locations: list[RawLocation], project_root: Path
+) -> list[RawLocation]:
+    """公開前に失われたrawを除外する。
+
+    **`raw_path` が `gs://` かどうかが「永続化されたか」の印である。** 公開すると
+    `raw_path` はGCSのURIへ書き換わる。ローカルパスのまま残っている取込は、rawが
+    取得したマシンの上にしか存在しなかったということである。
+
+    実際に2026-10-06の日次更新で、アーカイブは取得に成功したのに後続のステップが
+    落ちてraw公開がスキップされ、5ファイルがランナーごと消えた。その状態で差分
+    Parquetビルドを回すと、読めないファイルで `FileNotFoundError` になり、**1件の
+    消失が以後のビルドを恒久的に止めた**。
+
+    除外するのは「ローカルパスなのに実体が無い」ものだけに限る。`gs://` を指していて
+    オブジェクトが無いのは保管の破損であり、黙って飛ばしてはいけない。そちらは
+    `_read_remote` が `gcloud` の失敗として大きな音を立てる。
+    """
+    lost = [
+        location
+        for location in locations
+        if not location.is_remote
+        and not _resolve_local(location.raw_path, project_root).is_file()
+    ]
+    if not lost:
+        return locations
+    run_ids = ", ".join(str(location.ingestion_run_id) for location in lost)
+    print(
+        f"  ! 公開前に失われたrawを除外します: {len(lost)}ファイル（取込実行 {run_ids}）。"
+        "取得は成功したが永続化されていないため、読める原本がありません。"
+        "必要なら取り直して `python backend/scripts/publish_raw.py` で公開してください"
+    )
+    return [location for location in locations if location not in lost]
+
+
 def find_raw_locations(
     connection: Connection,
     job_type: str,
     *,
     status: str = "succeeded",
     after_run_id: int | None = None,
+    project_root: Path | None = None,
 ) -> list[RawLocation]:
     """指定した取込種別のrawの所在を、取込実行の順に返す。
 
@@ -55,6 +96,9 @@ def find_raw_locations(
     `after_run_id` を渡すと、その取込実行より後のものだけを返す。差分更新で使う。
     GitHub Actionsのランナーは使い捨てでローカルキャッシュが無く、2年分のrawを
     毎日GCSから読み直すと1ファイルずつの取得で30分を超えるため。
+
+    `project_root` を渡すと、公開前に失われたrawを除外する。読み出し側は原本が
+    1件失われただけで止まるべきではない。
     """
     query = """
         SELECT ingestion_run_id, raw_path
@@ -66,9 +110,12 @@ def find_raw_locations(
         query += " AND ingestion_run_id > ?"
         params += (after_run_id,)
     rows = connection.execute(query + " ORDER BY ingestion_run_id", params).fetchall()
-    return [
+    locations = [
         RawLocation(int(row["ingestion_run_id"]), str(row["raw_path"])) for row in rows
     ]
+    if project_root is None:
+        return locations
+    return _drop_raw_lost_before_publication(locations, project_root)
 
 
 def _cached_path(uri: str, raw_dir: Path | None) -> Path | None:
@@ -124,9 +171,7 @@ def read_raw(
         if cached is not None and cached.is_file():
             return _read_local(cached)
         return _read_remote(location.raw_path, runner)
-    path = Path(location.raw_path)
-    resolved = path if path.is_absolute() else project_root / path
-    return _read_local(resolved)
+    return _read_local(_resolve_local(location.raw_path, project_root))
 
 
 def iter_raw(
@@ -144,8 +189,13 @@ def iter_raw(
     呼び出し側が逐次処理できるようにする。
 
     `after_run_id` で読む範囲を絞れる。差分更新の入口。
+
+    公開前に失われたrawは除外する。原本が1件失われただけでビルドが止まると、
+    その後のすべての差分更新ができなくなる。
     """
-    for location in find_raw_locations(connection, job_type, after_run_id=after_run_id):
+    for location in find_raw_locations(
+        connection, job_type, after_run_id=after_run_id, project_root=project_root
+    ):
         yield location, read_raw(
             location, project_root=project_root, raw_dir=raw_dir, runner=runner
         )

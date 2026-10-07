@@ -92,7 +92,7 @@ def update_investment_target(
 ):
     if not repo.find_by_id(target_id):
         raise HTTPException(status_code=404, detail="InvestmentTarget not found")
-    repo.update(target_id, body.model_dump(exclude_none=True))
+    repo.update(target_id, body.model_dump(exclude_unset=True))
     return repo.find_by_id(target_id)
 
 
@@ -100,4 +100,4 @@ def update_investment_target(
 def delete_investment_target(target_id: int, repo: InvestmentTargetRepository = Depends(_repo)):
     if not repo.find_by_id(target_id):
         raise HTTPException(status_code=404, detail="InvestmentTarget not found")
-    repo.update(target_id, {"is_monitored": False})
+    repo.set_watchlist_status(target_id, None)

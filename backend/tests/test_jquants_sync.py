@@ -37,11 +37,16 @@ def test_target_key_to_jpx_code(target_key, expected):
 
 
 def _add_target(conn, target_key, is_monitored=True):
-    return conn.execute(
-        "INSERT INTO investment_target (target_key, target_name, target_type, is_monitored) "
-        "VALUES (?, ?, 'individual_stock', ?)",
-        (target_key, target_key, is_monitored),
+    target_id = conn.execute(
+        "INSERT INTO investment_target (target_key, target_name, target_type) "
+        "VALUES (?, ?, 'individual_stock')",
+        (target_key, target_key),
     ).lastrowid
+    conn.execute(
+        "INSERT INTO watchlist_entry (target_id, status) VALUES (?, ?)",
+        (target_id, "monitoring" if is_monitored else "paused"),
+    )
+    return target_id
 
 
 def test_unmapped_codes_are_derived_from_monitored_targets(db):
@@ -133,6 +138,10 @@ def test_active_jquants_codes_uses_only_current_primary_identifiers(db):
         VALUES ('test', 'Test', 'individual_stock')
         """
     ).lastrowid
+    db.execute(
+        "INSERT INTO watchlist_entry (target_id, status) VALUES (?, 'monitoring')",
+        (target_id,),
+    )
     db.executemany(
         """
         INSERT INTO investment_target_identifier

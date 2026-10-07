@@ -77,7 +77,16 @@ def active_jquants_codes(conn: Connection) -> list[str]:
             WHERE ds.source_key = 'jquants'
               AND ai.identifier_type = 'jpx_code'
               AND ai.is_primary = TRUE
-              AND a.is_monitored = TRUE
+              AND (EXISTS (SELECT 1 FROM watchlist_entry w
+                           WHERE w.target_id = a.target_id AND w.status = 'monitoring')
+                   OR EXISTS (
+                       SELECT 1 FROM mandate_target_assignment ma
+                       JOIN mandate_version v ON v.mandate_version_id = ma.mandate_version_id
+                       JOIN capital_allocation_mandate m ON m.mandate_id = v.mandate_id
+                       WHERE ma.target_id = a.target_id AND ma.status = 'active'
+                         AND ma.effective_until IS NULL
+                         AND v.effective_until IS NULL AND m.status = 'active'
+                   ))
               AND ai.valid_from <= CURRENT_DATE
               AND (ai.valid_to IS NULL OR ai.valid_to >= CURRENT_DATE)
             ORDER BY ai.identifier

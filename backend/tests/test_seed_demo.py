@@ -160,6 +160,10 @@ def test_demo_prices_carry_no_jpx_code(demo_db):
     assert rows, "価格が生成されていない"
     assert all(row["jpx_code"] is None for row in rows)
     assert {row["target_key"] for row in rows} == {c.key for c in seed_demo.COMPANIES}
+    assert all(row["raw_close_price"] == row["close_price"] for row in rows)
+    assert all(row["raw_volume"] == row["volume"] for row in rows)
+    assert all(row["adjustment_factor"] == 1.0 for row in rows)
+    assert all(row["ex_rights_type"] is None for row in rows)
 
 
 def test_demo_parquet_cannot_be_published_to_the_real_bucket(tmp_path):

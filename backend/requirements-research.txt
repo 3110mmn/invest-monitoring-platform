@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# 再現可能な探索分析をローカルで実行するためだけの依存。
+jupyterlab>=4,<5
+matplotlib>=3.8,<4

@@ -24,6 +24,7 @@ from build_financial_parquet import (
     write_year_partitions,
 )
 from build_parquet import PRICE_SCHEMA
+from build_security_master import SECURITY_MASTER_SCHEMA
 
 QUARTER_ROW = {
     "Code": "86970",
@@ -77,6 +78,12 @@ def publish_disclosures(tmp_path, monkeypatch):
     price_partition = tmp_path / "observed" / "market_price" / "year=2026"
     price_partition.mkdir(parents=True)
     pq.write_table(pa.Table.from_pylist([], schema=PRICE_SCHEMA), price_partition / "part-0.parquet")
+    master = tmp_path / "reference" / "security_master"
+    master.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([], schema=SECURITY_MASTER_SCHEMA),
+        master / "part-0.parquet",
+    )
     published: list[dict] = []
 
     def _publish(*raw_rows: dict) -> None:

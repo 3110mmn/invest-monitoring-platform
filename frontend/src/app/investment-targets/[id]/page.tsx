@@ -11,6 +11,7 @@ import {
   getMarketPrices,
 } from "@/lib/api";
 import { withForecastChanges } from "@/lib/forecast";
+import { INVESTMENT_TARGET_TYPE_LABELS } from "@/types";
 import type {
   FinancialDisclosure,
   InvestmentTarget,
@@ -139,7 +140,7 @@ export default function InvestmentTargetDetailPage({
           <span className="font-mono text-lg text-gray-500">{target.target_key}</span>
         </h1>
         <p className="text-sm text-gray-500 mt-1">
-          {target.target_type ?? "—"} / {target.market ?? "—"} / {target.currency ?? "—"}
+          {target.target_type ? INVESTMENT_TARGET_TYPE_LABELS[target.target_type] : "—"} / {target.market ?? "—"} / {target.currency ?? "—"}
         </p>
       </div>
 
