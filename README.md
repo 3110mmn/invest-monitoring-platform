@@ -26,7 +26,17 @@
 | Web | Next.jsで投資枠、ウォッチリスト、テーマ、株価、財務実績・会社予想・開示履歴を表示 |
 | Cloud | Cloud Run、Neon PostgreSQL、GCS、Artifact Registry、Secret Manager、IAMを利用 |
 | 運用 | GitHub ActionsによるCI/CD・日次ETL・バックアップ、readiness、復元検証 |
-| 品質 | PostgreSQLを使うバックエンドテスト293件、フロントエンドテスト5件、型・lint・build検証 |
+| 分析基盤 | GCS raw → BigQuery → dbt（staging / intermediate / marts）。point-in-timeの不変条件をテストで固定 |
+| 品質 | PostgreSQLを使うバックエンドテスト329件、フロントエンドテスト5件、型・lint・build検証 |
+
+### dbt docs（モデルの依存グラフ・テスト・SQL）
+
+**[dbt docs を見る](https://3110mmn.github.io/invest-monitoring-platform/dbt/)**
+
+右下のアイコンからリネージグラフを開けます。載せているのはモデルの依存関係、列定義、
+テスト、コンパイル済みSQLで、観測値そのものは含みません（市場データの再配布は
+利用規約で禁止されているため、生成時に `--empty-catalog` を使い、公開前に
+`scripts/check_dbt_docs_safe.py` で混入を検査しています）。
 
 ---
 
@@ -112,6 +122,13 @@
   採用規則を1か所で決める
 - **財務開示を履歴として持つ** — 実績、会社予想、予想改訂を開示時点のまま保持する
 - **来歴を辿る** — 分析層の値から取得元・取込実行・取得時点をたどり、GCS上のrawまで遡る
+- **継続監視の条件を登録して判定する** — 通期の売上高・営業利益・純利益について、期初予想比・
+  前年比・絶対値・符号転換をRuleとして登録する。判定結果（`fired` / `not_fired` /
+  `unavailable`）と当時のEvidence、発火後の対応方針を履歴として残す。Ruleの変更は
+  追記型versionで扱い、過去の判定は書き換えない
+- **時点整合を保って予想と実績を比べる** — 会社予想は期中に何度も出し直されるため、各予想へ
+  有効期間を持たせ、「その時点で見えていた予想」だけを使う。最後の予想で採点すると誤差が
+  見かけ上4割改善するため、dbtのテストで後知恵の混入を検出する
 - **公開デモで入力を試せる** — 架空データ環境で、期限付きの投資枠だけ誰でも作成・編集できる。
   書き込める範囲をDBロールとHTTP層の両方で絞る
 - **実データは非公開の管理APIから更新する**
@@ -129,9 +146,12 @@
 
 ```mermaid
 flowchart LR
-    Sources["J-Quants / yfinance"] --> Actions["GitHub Actions<br/>日次ETL"]
+    Sources["J-Quants / EDINET DB / yfinance"] --> Actions["GitHub Actions<br/>日次ETL"]
     Actions --> Raw[("GCS raw/<br/>原本・非公開")]
     Raw --> Lake[("GCS lake/<br/>Parquet・非公開")]
+    Raw --> BQ[("BigQuery<br/>分析履歴・非公開")]
+    BQ --> DBT["dbt<br/>staging → marts"]
+    DBT --> Research["探索・継続監視の判定"]
     Actions --> DB[("PostgreSQL<br/>監視対象・テーマ<br/>非公開")]
     Admin["管理者"] --> AdminAPI["Cloud Run admin-api<br/>read-write / IAM"]
     AdminAPI --> DB
@@ -143,8 +163,12 @@ flowchart LR
     PublicAPI -->|"DuckDB"| DemoLake
 ```
 
-**rawが原本で、ParquetもPostgreSQLも派生です。** PostgreSQLは「何を監視しているか」を持ち、
-Parquetは「その値がいくらだったか」を持ちます。価格と財務はParquetからしか読みません。
+**rawが原本で、ParquetもPostgreSQLもBigQueryも派生です。** PostgreSQLは「何を監視しているか」を
+持ち、Parquetは「その値がいくらだったか」を持ちます。価格と財務はParquetからしか読みません。
+
+**rawからの下流は2本あります。** Parquet / DuckDBが日次運用とAPIの読み出しを担い、
+BigQuery / dbtが複数年度・複数銘柄を横断する変換と分析履歴を担います。APIがBigQueryを
+読まないのは、閲覧のたびにスキャン課金が発生するためです。
 
 公開APIと管理APIは**同じイメージ・同じコード**を使い、Cloud Runサービス・DBロール・環境変数・IAMで権限を分けます。
 
@@ -191,8 +215,9 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 | バックエンド | Python 3.11 / FastAPI / psycopg |
 | DB | PostgreSQL 17 / Alembic |
 | フロントエンド | Next.js 16 / TypeScript / Tailwind CSS |
-| 分析層 | GCS Parquet / DuckDB / pyarrow |
-| データ取得 | J-Quants API / yfinance |
+| 分析層（読み出し） | GCS Parquet / DuckDB / pyarrow |
+| 分析層（変換・履歴） | BigQuery / dbt（staging / intermediate / marts） |
+| データ取得 | J-Quants API / EDINET DB API / yfinance |
 | インフラ | Cloud Run / Cloud Storage / Artifact Registry / Secret Manager / IAM / Neon |
 | CI/CD | GitHub Actions（lint・型・テスト・Dockerビルド / deploy / 日次ETL / backup） |
 
