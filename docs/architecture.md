@@ -19,22 +19,31 @@ rawが原本で、ParquetもPostgreSQLも派生です。
 
 ```mermaid
 flowchart LR
-    Sources["J-Quants / yfinance"]
-    Fetch["Fetch<br/>retry / rate limit"]
+    Sources["J-Quants / EDINET DB / yfinance"]
+    Fetch["Fetch<br/>retry / rate limit / budget"]
     Raw[("GCS raw/<br/>JSON.gz・原本")]
     Build["build_security_master<br/>build_parquet<br/>build_financial_parquet"]
     Lake[("GCS lake/<br/>security master / price / financial Parquet")]
-    Run[("PostgreSQL<br/>Control Plane<br/>投資枠・テーマ・監視対象・来歴")]
+    Run[("PostgreSQL<br/>Control Plane<br/>投資枠・テーマ・監視対象・Rule・来歴")]
     Duck["DuckDB<br/>preferred_price<br/>financial_disclosure"]
+    BQRaw[("BigQuery invest_raw<br/>source_response")]
+    BQStg[("BigQuery invest_staging")]
+    DBT["dbt<br/>staging / intermediate / marts"]
+    Mart[("BigQuery invest_marts<br/>fct_metric_comparison")]
     API["FastAPI"]
     Web["Next.js"]
 
     Sources --> Fetch --> Raw --> Build --> Lake --> Duck --> API
     Fetch --> Run
     Build -->|"rawの所在を引く"| Run
-    Run -->|"監視対象の target_key"| API
+    Run -->|"監視対象・Rule"| API
     API --> Web
+    Raw --> BQRaw --> BQStg --> DBT --> Mart
 ```
+
+**rawからの経路は2本あります。** Parquet / DuckDBは日次運用とAPIの読み出し、
+BigQuery / dbtは複数年度・複数銘柄を横断する分析履歴です。どちらもGCS rawを原本とし、
+削除して作り直せます。
 
 公開デモには外部取得データを流しません。**同じコードを通し**、別バケットのsynthetic
 Parquetと別PostgreSQLだけを参照します。分離はコードの分岐ではなくバケットの権限で
@@ -50,32 +59,112 @@ Parquetと別PostgreSQLだけを参照します。分離はコードの分岐で
 
 ## Exploration PlaneとOperational Plane
 
-分析基盤とWebアプリは同じParquetを参照できますが、目的と公開境界を分けます。
+汎用Trigger基盤の最初の定義は、財務Parquetから通期の売上高・営業利益・純利益を取得し、
+期初予想比・前年比・絶対値・符号転換をDerived SQLで計算する。PostgreSQLには汎用Ruleとversion、
+判定時のEvidence、発火後の対応方針・理由・次回確認日を保存する。Webの `/triggers` から手動実行でき、再生と実運用を分離する。
+Rule自体の有用性を評価する監査・学習機能は現時点で実装しない。
+
+### Webアプリで実装する範囲
+
+**Webアプリは「何が発火し、誰がどう対応したか」を扱い、「なぜ発火したのか」は扱いません。**
+
+| 実装する | 実装しない |
+|---|---|
+| Trigger Ruleの設定とversion | 利益率・CF分解の画面 |
+| `fired` / `not_fired` / `unavailable` の一覧 | 業種比較の画面 |
+| 予想値・実績値・乖離率・公表日時の表示 | 原因仮説の検証UI |
+| 発火案件への対応方針と理由の入力 | 一度限りの追加調査 |
+| Evidenceへのリンクと対応履歴 | 分析手法ごとの専用API |
+
+詳細分析の画面を先に作ると、**分析手法が増えるたびにAPI・画面・スキーマが増殖します。**
+まずSQLやNotebookで手法を試し、複数の発火案件で繰り返し使われたものだけをOperational側へ
+昇格させます。
+
+分析結果をWebと完全に分断するわけではありません。Webには分析そのものではなく、**結果への
+参照と人間の結論**を残します（分析種別、要約、成果物URI、実施時刻、実施者、対応方針）。
+
+### 2つのPlane
 
 ```mermaid
 flowchart LR
-    Lake[("GCS Parquet<br/>Master / Observed")]
+    Lake[("GCS Parquet")]
+    BQ[("BigQuery<br/>dbt marts")]
     Duck["DuckDB"]
     Research["Exploration / Research<br/>Notebook / SQL"]
-    AppDB[("PostgreSQL<br/>Operational state")]
-    API["FastAPI<br/>Decision operations"]
+    AppDB[("PostgreSQL<br/>Rule・発火状態・対応履歴")]
+    API["FastAPI<br/>Trigger operations"]
     Web["Next.js<br/>Trigger Dashboard"]
 
     Lake --> Duck --> Research
-    Research -. "価値を確認した仮説・監視条件だけpromote" .-> AppDB
+    BQ --> Research
+    Research -. "繰り返し使われた分析だけpromote" .-> AppDB
     AppDB --> API --> Web
     Lake --> Duck -->|"監視対象の価格・財務・Evidence"| API
+    Web -. "発火案件を起点に調べる" .-> Research
+    Research -. "結論と成果物URIを記録" .-> Web
 ```
 
 | Plane | 目的 | 実装 | 保存するもの |
 |---|---|---|---|
-| Exploration / Research | 横断・時系列分析、仮説の発見と検証 | TradingView、DuckDB、Notebook、SQL | 分析コード、パラメータ、結果要約。中間結果は原則一時的 |
-| Operational Decision System | 仮説、評価、Trigger、Decisionの継続運用 | PostgreSQL、FastAPI、Next.js | バージョン付き定義、実行結果、Evidence参照、確認・判断履歴 |
+| Exploration / Research | 横断・時系列分析、原因分析、仮説の検証 | BigQuery、dbt、DuckDB、Notebook、SQL | 分析コード、パラメータ、結果要約。中間結果は原則一時的 |
+| Operational Decision System | Rule、発火状態、人間の対応履歴の継続運用 | PostgreSQL、FastAPI、Next.js | バージョン付き定義、実行結果、Evidence参照、確認・判断履歴 |
 
 FastAPIは任意の探索クエリをHTTP機能として固定する場所ではありません。一度限りのスクリーニングや検証は
 Research側で行います。継続監視する利用者、更新頻度、判断への接続、欠損時の扱いが決まったものだけを、
 Assessment Definition、Trigger、Dashboardへ昇格させます。Derivedが存在することや、分析が興味深いこと
 だけを理由にAPI endpoint、Web画面、定期martを追加しません。
+
+## 分析基盤の使い分け
+
+**DuckDBとBigQuery/dbtは置き換えではなく併存します。** 同じ問いに2つの答えを持たせないため、
+役割を分けます。
+
+| | DuckDB + Parquet | BigQuery + dbt |
+|---|---|---|
+| 探索・試行錯誤 | **採用**。無料・即座・外部依存なし | スキャン課金が試行回数に比例する |
+| 合成データでのテスト | **採用**。`tmp_path`にParquetを書いて実行 | 認証とデータセットが要る |
+| APIと画面の読み出し | **採用**。閲覧ごとの課金が無い | 閲覧のたびに課金される |
+| 複数年度・全市場の横断 | メモリと実行時間が制約になる | **採用** |
+| 系譜・テスト・成果物の共有 | 手書きで管理することになる | **採用**。dbtが持つ |
+
+dbtを使う理由は、**point-in-timeの不変条件をSQLの外側でテストできる**ことです。
+`analytics/dbt/models/sources.yml`が入口で`available_at`のnot_nullを検査し、
+`tests/reference_precedes_current.sql`が「比較対象は現在より前の時点であること」を検証します。
+後知恵の混入は値を見ても気づけないため、テストとして固定します。
+
+| ファイル | 役割 |
+|---|---|
+| `analytics/dbt/dbt_project.yml` | モデルをどう作るか。`marts`だけ`table`、他は`view` |
+| `analytics/dbt/profiles.yml` | どこへ繋ぐか。`maximum_bytes_billed`もここ |
+| `analytics/dbt/models/sources.yml` | dbtの外から来るものの宣言と入口の検査 |
+| `analytics/dbt/models/marts/schema.yml` | dbtが作ったものの説明と出口の検査 |
+
+移行期間は`analytics/dbt/reconcile_duckdb.py`が、dbtのFactと既存のDuckDB定義を
+ローカルの重なり範囲で突き合わせます。SQLを書き直すと意味が静かに変わることがあり、
+テストでは捕まえにくいためです。
+
+**Airflowはまだ導入していません。** 取得・品質検証・変換・Trigger評価の依存と再実行を
+GitHub Actionsで表現しきれなくなった時点で検討します。
+
+### dbt docsの公開とCIの権限
+
+dbt docsはモデルの依存グラフ、列定義、テスト、コンパイル済みSQLを含む静的サイトで、
+観測値そのものを含みません。生成は非公開側のGitHub Actions、配信は公開スナップショットの
+GitHub Pagesが担います（Pagesは無料プランではpublicリポジトリでのみ利用可、生成には
+BigQueryへの認証が要るという非対称のため）。
+
+**`dbt docs generate --empty-catalog`を使い、CIへ`bigquery.dataViewer`を与えません。**
+dbtのBigQueryアダプタはcatalog生成時に`__TABLES__`を**クエリで**読むため、
+`metadataViewer`では足りず`dataViewer`が要ります。これを与えるとCIのサービスアカウントが
+J-Quants実データの行を読めるようになります。workflowは読みませんが、能力は残ります。
+
+catalogを空にして失うのは、warehouse上の列の型と`schema.yml`へ書いていない列名だけです。
+DAG、description、テスト、compiled SQLはmanifest側に残ります。列の説明が要るなら
+`schema.yml`へ書きます。そちらの方がドキュメントとして確かです。
+
+CIのサービスアカウントに付与しているのは`bigquery.jobUser`と`bigquery.metadataViewer`
+だけです。`scripts/check_dbt_docs_safe.py`が、公開前に行数統計・銘柄コードのリテラル・
+認証情報の混入を検査します。
 
 ## 実行環境
 
@@ -232,6 +321,8 @@ rawを失った取込は差分の対象から除きます。`raw_path`が`gs://`
 | DBバックアップ | GCS `postgres-backups/` | GitHub Actions |
 | API rawレスポンス | GCS `raw/` | GitHub Actions |
 | 全市場Master / Observed | GCS `lake/` Parquet | `build_security_master.py` / `build_parquet.py` / `build_financial_parquet.py` |
+| 分析履歴（raw / staging） | BigQuery `invest_raw` / `invest_staging` | `load_bigquery_financial_history.py` / `load_jquants_bigquery.py` |
+| 分析履歴（変換結果） | BigQuery `invest_marts` 等 | dbt（`analytics/dbt/`） |
 | ローカル開発データ | Docker PostgreSQL volume | ローカルAPI、開発者 |
 
 GCSはライフサイクルで保持方針を固定します。**`raw/`は削除しません。**原本であり、
@@ -274,9 +365,9 @@ DuckDB接続はアプリのlifespanで1つ持ち、起動時に温めます。�
 2.8秒かかりますが、使い回せば0.15秒です。
 
 残りは日次ETLのPostgreSQLロードの廃止と、読まれなくなったテーブルの削除です。
-PostgreSQLには投資枠、テーマ、監視対象、関係、設定、取込メタデータを残します。DuckDB / dbtでDerivedやmartを生成し、
-GitHub Actionsで実行時間、再試行、並列性が不足した場合だけ、バッチ実行先を
-Cloud Run Jobs等へ交換します。
+PostgreSQLには投資枠、テーマ、監視対象、関係、設定、Trigger Rule、対応履歴、取込メタデータを残します。
+DuckDB / dbtでDerivedやmartを生成し、GitHub Actionsで実行時間、再試行、並列性が不足した場合だけ、
+バッチ実行先をCloud Run Jobs等へ交換します。
 
 責務分離の判断基準と、段階移行のうち未了の部分は
 [データ層の設計原則](data/design-principles.md#物理データフロー)を正本とします。

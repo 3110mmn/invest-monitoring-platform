@@ -176,9 +176,16 @@ SHARED_INT_FIELDS: dict[str, str] = {
 }
 
 # DivAnn / FDivAnn は年間1株配当。DivTotalAnn は配当金の総額なので使わない。
+#
+# **DivUnit はREIT専用で、DivAnn とは別の項目である。** 実レスポンスで数えると、REITの
+# 決算短信は DivUnit が21/21件で DivAnn は0件、通常株は DivAnn が33/75件で DivUnit は0件と
+# 完全に分かれていた。DivAnn だけを読んでいたためJ-REIT 58銘柄の分配金がすべてNULLだった。
+# FDivUnit は28件のREIT開示で一度も値が入らなかったので列を作らない。
 SHARED_REAL_FIELDS: dict[str, str] = {
     "annual_dividend_per_share": "DivAnn",
     "forecast_annual_dividend_per_share": "FDivAnn",
+    "distribution_per_unit": "DivUnit",
+    "next_forecast_distribution_per_unit": "NxFDivUnit",
 }
 
 
@@ -188,7 +195,14 @@ def parse_document_type(document_type: str) -> tuple[str | None, str | None]:
     決算短信の `DocType` は `1QFinancialStatements_Consolidated_IFRS` の形式で、
     連結範囲と会計基準を含む。`EarnForecastRevision` のように含まない種別もあるため、
     その場合は両方 None を返す。
+
+    **`REITEarnForecastRevision` だけは非連結として扱う。** この種別は区切りを持たないため
+    既定の連結扱いになっていたが、実レスポンスでは連結系（`FSales`等）が7件中0個、非連結系
+    （`FNCSales`、`NxFNCSales`等）が45個で、投資法人は非連結でしか予想を出していなかった。
+    連結系の項目名を読んでいたため、REITの予想修正は全項目NULLで取り込まれていた。
     """
+    if document_type == "REITEarnForecastRevision":
+        return "REIT", "non_consolidated"
     parts = document_type.split("_")
     if len(parts) < 3 or "FinancialStatements" not in parts[0]:
         return None, None

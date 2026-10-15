@@ -108,6 +108,9 @@ def test_source_record_hash_detects_content_change():
         ("FYFinancialStatements_NonConsolidated_JP", ("JP", "non_consolidated")),
         # 業績予想の修正には会計基準も連結範囲も含まれない
         ("EarnForecastRevision", (None, None)),
+        ("FYFinancialStatements_Consolidated_REIT", ("REIT", "consolidated")),
+        # 投資法人の予想修正は非連結でしか項目が入らない
+        ("REITEarnForecastRevision", ("REIT", "non_consolidated")),
     ],
 )
 def test_document_type_carries_standard_and_scope(document_type, expected):
@@ -138,6 +141,60 @@ def test_annual_dividend_uses_per_share_not_total():
     ).values
 
     assert values["annual_dividend_per_share"] == pytest.approx(61.0)
+
+
+def test_reit_distribution_is_read_from_div_unit():
+    """投資法人の分配金は `DivUnit` にあり、`DivAnn` は空である。
+
+    `DivAnn` だけを読んでいたためJ-REIT 58銘柄の分配金がすべてNULLになっていた。
+    """
+    values = normalize_jquants_financial(
+        {
+            **BASE_ROW,
+            "Code": "89510",
+            "DocType": "FYFinancialStatements_Consolidated_REIT",
+            "DivAnn": "",
+            "DivUnit": "2454",
+            "NxFDivUnit": "2460",
+        }
+    ).values
+
+    assert values["distribution_per_unit"] == pytest.approx(2454.0)
+    assert values["next_forecast_distribution_per_unit"] == pytest.approx(2460.0)
+    assert "annual_dividend_per_share" not in values
+
+
+def test_ordinary_stock_has_no_distribution_per_unit():
+    """通常株は `DivUnit` を持たない。配当と分配金を混ぜない。"""
+    values = normalize_jquants_financial({**BASE_ROW, "DivAnn": "61.0"}).values
+
+    assert values["annual_dividend_per_share"] == pytest.approx(61.0)
+    assert "distribution_per_unit" not in values
+
+
+def test_reit_forecast_revision_reads_non_consolidated_fields():
+    """投資法人の予想修正は非連結項目から取り込む。
+
+    `REITEarnForecastRevision` は区切りを持たないため既定の連結扱いになり、連結系の
+    項目名を読んでいた。実レスポンスでは連結系が0個、非連結系が45個で、全項目NULLの
+    まま取り込まれていた。
+    """
+    record = normalize_jquants_financial(
+        {
+            **BASE_ROW,
+            "Code": "89510",
+            "DocType": "REITEarnForecastRevision",
+            "Sales": "",
+            "NxFNCSales": "53924000000",
+            "NxFNCNP": "24064000000",
+            "NxFNCEPS": "2782.0",
+        }
+    )
+
+    assert record.reporting_scope == "non_consolidated"
+    assert record.values["next_forecast_revenue"] == 53924000000
+    assert record.values["next_forecast_net_income"] == 24064000000
+    assert record.values["next_forecast_eps"] == pytest.approx(2782.0)
 
 
 def test_next_period_forecast_field_names():

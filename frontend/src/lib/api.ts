@@ -20,58 +20,8 @@ import type {
   ThemeDetail,
   ThemeSummary,
 } from "@/types";
-
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
-
-/** APIのエラー応答。成功時は素のボディで、エラー時だけこの形に揃う。 */
-interface ApiErrorBody {
-  error: { status: number; code: string; message: string; details?: unknown[] };
-}
-
-/**
- * APIがエラー応答を返したことを表す。
- * 呼び出し側が「データが無い(404)」と「障害(5xx等)」を区別できるように status を持つ。
- * `code` はステータスから決まる機械可読な値で、message の文言に依存せず分岐できる。
- * 通信断やJSONパース失敗は素の Error のままなので、これも障害として扱われる。
- */
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly code?: string,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-/** エラーボディから表示用のメッセージとコードを取り出す。形式が違っても落とさない。 */
-async function readError(res: Response): Promise<{ message: string; code?: string }> {
-  try {
-    const body = (await res.json()) as Partial<ApiErrorBody>;
-    if (body?.error?.message) {
-      return { message: body.error.message, code: body.error.code };
-    }
-  } catch {
-    // JSONでない応答（プロキシのHTMLエラーページ等）はステータス表記へ落とす
-  }
-  return { message: res.statusText || `HTTP ${res.status}` };
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!res.ok) {
-    const { message, code } = await readError(res);
-    throw new ApiError(res.status, message, code);
-  }
-  if (res.status === 204) {
-    return undefined as T;
-  }
-  return res.json() as Promise<T>;
-}
+import { request } from "./http";
+export { ApiError } from "./http";
 
 // ---- Themes ----
 export const getThemes = (isActive?: boolean) =>

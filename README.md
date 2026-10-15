@@ -35,6 +35,14 @@
 **意思決定そのものをデータモデル化したい**、というのが出発点です。何を見て、どう評価し、何を選び、
 結果はどうだったか。これを記録し、後から検証できる形にしたいと考えました。
 
+このプロジェクトは市場データそのものを提供するサービスではありません。外部の市場・財務・公的統計と、
+利用者固有の投資枠・監視対象・仮説・Ruleを結合し、**その利用者の意思決定に使えるデータへ変換する基盤**を
+目指しています。一般的なチャート、スクリーニング、テクニカル通知は既存サービスへ委譲し、利用者固有の
+文脈との結合、時点整合、来歴、Trigger発火後の対応と学習に集中します。
+
+現在は個人の投資データへ適用したReference Implementationです。将来的には、
+利用者のVPC・Private Cloud・社内DWH等のtrust boundary内へ処理を配置できる構成を設計方向としています。
+
 ### なぜ投資を題材にしたか
 
 意思決定を扱う領域は多くありますが、投資には次が揃っています。
@@ -229,7 +237,7 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 |---|---|
 | システム構成・権限境界 | [docs/architecture.md](docs/architecture.md) |
 | データ層の論理設計 | [docs/data/design-principles.md](docs/data/design-principles.md) |
-| 列の意味・粒度・単位 | [docs/data/schema-data-dictionary.md](docs/data/schema-data-dictionary.md) |
-| 型・制約・ER図（自動生成） | [docs/data/schema-reference.md](docs/data/schema-reference.md) |
-| 取得元の選択・利用条件 | [docs/data/sources.md](docs/data/sources.md) |
+| PostgreSQL列の意味・粒度・単位 | [docs/data/data-definitions/postgresql.md](docs/data/data-definitions/postgresql.md) |
+| PostgreSQLの型・制約・ER図（自動生成） | [docs/data/data-definitions/postgresql-schema-reference.md](docs/data/data-definitions/postgresql-schema-reference.md) |
+| Parquetデータセットの列・由来・変換 | [docs/data/data-definitions/parquet.md](docs/data/data-definitions/parquet.md) |
 | セットアップ・検証 | [docs/development.md](docs/development.md) |

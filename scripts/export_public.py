@@ -40,7 +40,19 @@ EXCLUDE_EXACT = (
     ".github/workflows/daily-update.yml",
     # 実運用DBのcleanup用。公開スナップショットのActionsに含めない。
     ".github/workflows/cleanup-public-demo.yml",
+    # dbt docsの生成はBigQueryへの認証を要し、`GCP_CREDENTIALS`は非公開側にしか無い。
+    # 公開側へ置くとpushのたびに失敗して赤くなる。生成は非公開側で行い、成果物だけを
+    # `--dbt-docs`で公開ツリーへ取り込む。
+    ".github/workflows/publish-dbt-docs.yml",
 )
+
+# dbt docsの静的サイトを置く公開ツリー上の位置。GitHub PagesのSource設定で
+# `/docs`を選べるため、公開リポジトリ側の設定だけで配信できる。
+DBT_DOCS_DESTINATION = "docs/dbt"
+
+# 配信に要るファイル。`index.html`が読むのはmanifestとcatalogだけで、compiled SQLや
+# 実行ログは持ち込まない。
+DBT_DOCS_FILES = ("index.html", "manifest.json", "catalog.json")
 
 # 出力ツリーに1つでも見つかったら公開を中止する。除外リストの漏れを最後に捕まえる。
 SECRET_PATTERNS = {
@@ -105,7 +117,7 @@ def dangling_references(root: Path, excluded: list[str]) -> list[str]:
 
     **ファイル名ではなくパスで判定する。** 以前は除外ファイルのbasenameを部分一致で
     探していたため、`memo/plan/README.md` を除外するとルートの `README.md` が、
-    `memo/jquants/data-dictionary.md` を除外すると `schema-data-dictionary.md` が
+    `memo/jquants/data-dictionary.md` を除外すると `data-definitions/postgresql.md` が
     誤検出された。リンクは書かれた位置から解決し、公開ツリーに実体があるかを見る。
     """
     excluded_paths = set(excluded)
@@ -152,12 +164,55 @@ def export(destination: Path) -> tuple[list[str], list[str]]:
     return included, excluded
 
 
+def copy_dbt_docs(source: Path, destination: Path) -> list[str]:
+    """生成済みのdbt docsを公開ツリーへ取り込む。
+
+    **生成はしない。** `dbt docs generate`はBigQueryへの認証を要するため、非公開側の
+    workflowで作ったartifactを展開したディレクトリを受け取る。
+
+    取り込む前に`check_dbt_docs_safe.py`と同じ検査を通す。workflowでも検査しているが、
+    artifactを手で差し替えられる以上、公開の直前にもう一度確かめる。
+    """
+    missing = [name for name in DBT_DOCS_FILES if not (source / name).is_file()]
+    if missing:
+        raise SystemExit(
+            f"中止しました。dbt docsに必要なファイルがありません: {', '.join(missing)}"
+        )
+
+    check = subprocess.run(
+        ["python", str(REPO_ROOT / "scripts/check_dbt_docs_safe.py"), str(source)],
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        raise SystemExit(
+            "中止しました。dbt docsに実データが含まれています。\n"
+            f"{check.stdout}{check.stderr}"
+        )
+
+    target_dir = destination / DBT_DOCS_DESTINATION
+    target_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for name in DBT_DOCS_FILES:
+        shutil.copy2(source / name, target_dir / name)
+        copied.append(f"{DBT_DOCS_DESTINATION}/{name}")
+    return copied
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="公開用スナップショットを書き出す（commit・pushはしない）"
     )
     parser.add_argument(
         "--out", required=True, type=Path, help="出力先ディレクトリ。既存の場合は中止する"
+    )
+    parser.add_argument(
+        "--dbt-docs",
+        type=Path,
+        help=(
+            "dbt docsのartifactを展開したディレクトリ。"
+            f"指定すると公開ツリーの {DBT_DOCS_DESTINATION} へ取り込む"
+        ),
     )
     args = parser.parse_args()
 
@@ -176,6 +231,10 @@ def main() -> int:
 
     destination.mkdir(parents=True, exist_ok=True)
     included, excluded = export(destination)
+
+    # **秘密の走査より前に取り込む。** 取り込んだ後に走査すれば、dbt docsも同じ検査を通る。
+    if args.dbt_docs is not None:
+        included.extend(copy_dbt_docs(args.dbt_docs.resolve(), destination))
 
     findings = scan_for_secrets(destination)
     if findings:

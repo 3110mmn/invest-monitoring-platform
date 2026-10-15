@@ -3,10 +3,11 @@
 方針は「導出できるものは生成し、意味づけは検査する」。
 
 生成対象:
-  - docs/data/schema-reference.md          全体を自動生成（手編集禁止）
+  - docs/data/data-definitions/postgresql-schema-reference.md
+    全体を自動生成（手編集禁止）
 
 検査対象（手書きの意味づけを保持したまま、構造との食い違いを検出する）:
-  - docs/data/schema-data-dictionary.md のテーブル一覧・列定義
+  - docs/data/data-definitions/postgresql.md のテーブル一覧・列定義
 
 使い方:
     python scripts/generate_schema_docs.py           # 生成して書き込む
@@ -33,13 +34,14 @@ MIGRATIONS_DIR = REPO_ROOT / "backend" / "migrations" / "versions"
 def migration_paths() -> list[Path]:
     """適用順のmigrationを返す。ファイル名の連番を順序とする。"""
     return sorted(p for p in MIGRATIONS_DIR.glob("*.py") if not p.name.startswith("__"))
-REFERENCE_PATH = REPO_ROOT / "docs" / "data" / "schema-reference.md"
-DICTIONARY_PATH = REPO_ROOT / "docs" / "data" / "schema-data-dictionary.md"
+DEFINITIONS_DIR = REPO_ROOT / "docs" / "data" / "data-definitions"
+REFERENCE_PATH = DEFINITIONS_DIR / "postgresql-schema-reference.md"
+DICTIONARY_PATH = DEFINITIONS_DIR / "postgresql.md"
 
 
 MARKDOWN_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
 BACKTICK_TOKEN = re.compile(r"`([^`]+)`")
-SQL_TYPES = r"TEXT|INTEGER|BIGINT|REAL|DOUBLE(?:\s+PRECISION)?|BOOLEAN|DATE|TIME|TIMESTAMPTZ|BLOB|NUMERIC"
+SQL_TYPES = r"TEXT|INTEGER|BIGINT|REAL|DOUBLE(?:\s+PRECISION)?|BOOLEAN|DATE|TIME|TIMESTAMPTZ|BLOB|NUMERIC|JSONB"
 TYPE_AND_NULL = re.compile(rf"^({SQL_TYPES})\s*/\s*(NO|YES)$", re.IGNORECASE)
 TYPE_ONLY = re.compile(rf"^({SQL_TYPES})$", re.IGNORECASE)
 
@@ -93,11 +95,11 @@ def render_reference(schema: Schema) -> str:
         "# スキーマ構造リファレンス（自動生成）",
         "",
         "このファイルは `generate_schema_docs.py` が",
-        "[初期migration](../../backend/migrations/versions/0001_initial_postgresql.py) から生成します。",
+        "[初期migration](../../../backend/migrations/versions/0001_initial_postgresql.py) から生成します。",
         "**直接編集しないでください。**",
         "",
-        "列の意味・由来・運用ルールは [`schema-data-dictionary.md`](schema-data-dictionary.md)、",
-        "論理層の設計方針は [`design-principles.md`](design-principles.md) を参照してください。",
+        "列の意味・由来・運用ルールは [`postgresql.md`](postgresql.md)、",
+        "論理層の設計方針は [`design-principles.md`](../design-principles.md) を参照してください。",
         "",
         "## テーブル一覧",
         "",

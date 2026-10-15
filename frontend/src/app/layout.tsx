@@ -14,6 +14,7 @@ const NAV = [
   { href: "/mandates", label: "投資枠" },
   { href: "/investment-targets", label: "ウォッチリスト" },
   { href: "/themes", label: "テーマ" },
+  { href: "/triggers", label: "トリガー" },
   ...(!PUBLIC_READ_ONLY ? [{ href: "/settings", label: "設定" }] : []),
 ];
 

@@ -1,11 +1,11 @@
 # スキーマ構造リファレンス（自動生成）
 
 このファイルは `generate_schema_docs.py` が
-[初期migration](../../backend/migrations/versions/0001_initial_postgresql.py) から生成します。
+[初期migration](../../../backend/migrations/versions/0001_initial_postgresql.py) から生成します。
 **直接編集しないでください。**
 
-列の意味・由来・運用ルールは [`schema-data-dictionary.md`](schema-data-dictionary.md)、
-論理層の設計方針は [`design-principles.md`](design-principles.md) を参照してください。
+列の意味・由来・運用ルールは [`postgresql.md`](postgresql.md)、
+論理層の設計方針は [`design-principles.md`](../design-principles.md) を参照してください。
 
 ## テーブル一覧
 
@@ -23,6 +23,10 @@
 | `mandate_target_assignment` | 12 | `assignment_id` |
 | `capital_budget_version` | 8 | `capital_budget_version_id` |
 | `watchlist_entry` | 4 | `target_id` |
+| `trigger_rule` | 4 | `rule_id` |
+| `trigger_rule_version` | 13 | `rule_version_id` |
+| `trigger_evaluation` | 13 | `evaluation_id` |
+| `trigger_response` | 8 | `response_id` |
 
 ## テーブル間の関係
 
@@ -39,6 +43,10 @@ erDiagram
     mandate_version ||--o{ mandate_target_assignment : mandate_version_id
     investment_target ||--o{ mandate_target_assignment : target_id
     investment_target ||--o| watchlist_entry : target_id
+    trigger_rule ||--o{ trigger_rule_version : rule_id
+    investment_target ||--o{ trigger_rule_version : target_id
+    trigger_rule_version ||--o{ trigger_evaluation : rule_version_id
+    trigger_evaluation ||--o{ trigger_response : evaluation_id
 ```
 
 ## テーブル定義
@@ -279,3 +287,76 @@ erDiagram
 
 - 主キー: `target_id`
 - 外部キー: `target_id` → `investment_target`(`target_id`)（ON DELETE CASCADE）
+
+### `trigger_rule`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `rule_id` | BIGINT | NO | `AS` | - |
+| `rule_key` | TEXT | NO | - | - |
+| `is_active` | BOOLEAN | NO | `TRUE` | - |
+| `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `rule_id`
+
+### `trigger_rule_version`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `rule_version_id` | BIGINT | NO | `AS` | - |
+| `rule_id` | BIGINT | NO | - | - |
+| `version` | INTEGER | NO | - | - |
+| `target_id` | BIGINT | NO | - | - |
+| `definition_key` | TEXT | NO | - | - |
+| `metric_key` | TEXT | NO | - | `revenue`, `operating_income`, `net_income` |
+| `comparison_type` | TEXT | NO | - | `forecast_variance`, `yoy`, `absolute`, `sign_transition` |
+| `operator` | TEXT | NO | - | `lte`, `gte`, `crosses_below`, `crosses_above` |
+| `threshold_value` | NUMERIC | YES | - | - |
+| `rationale` | TEXT | NO | - | - |
+| `actor_type` | TEXT | NO | `'human'` | `human`, `agent`, `system`, `import` |
+| `actor_id` | TEXT | YES | - | - |
+| `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `rule_version_id`
+- 一意キー: `rule_id`, `version`
+- 外部キー: `rule_id` → `trigger_rule`(`rule_id`)
+- 外部キー: `target_id` → `investment_target`(`target_id`)
+- テーブルCHECK: `(comparison_type = 'sign_transition' AND operator IN ('crosses_below', 'crosses_above') AND threshold_value IS NULL) OR (comparison_type <> 'sign_transition' AND operator IN ('lte', 'gte') AND threshold_value IS NOT NULL)`
+
+### `trigger_evaluation`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `evaluation_id` | BIGINT | NO | `AS` | - |
+| `rule_version_id` | BIGINT | NO | - | - |
+| `mode` | TEXT | NO | - | `replay`, `live` |
+| `event_key` | TEXT | NO | - | - |
+| `as_of_date` | DATE | NO | - | - |
+| `status` | TEXT | NO | - | `fired`, `not_fired`, `unavailable` |
+| `reason` | TEXT | NO | - | - |
+| `observed_value` | NUMERIC | YES | - | - |
+| `reference_value` | NUMERIC | YES | - | - |
+| `evidence` | JSONB | NO | - | - |
+| `evidence_hash` | TEXT | NO | - | - |
+| `definition_version` | TEXT | NO | - | - |
+| `evaluated_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `evaluation_id`
+- 一意キー: `rule_version_id`, `mode`, `event_key`
+- 外部キー: `rule_version_id` → `trigger_rule_version`(`rule_version_id`)
+
+### `trigger_response`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `response_id` | BIGINT | NO | `AS` | - |
+| `evaluation_id` | BIGINT | NO | - | - |
+| `response_type` | TEXT | NO | - | `continue`, `investigate`, `review_allocation`, `hold` |
+| `rationale` | TEXT | NO | - | - |
+| `next_review_on` | DATE | YES | - | - |
+| `actor_type` | TEXT | NO | `'human'` | `human`, `agent`, `system`, `import` |
+| `actor_id` | TEXT | YES | - | - |
+| `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `response_id`
+- 外部キー: `evaluation_id` → `trigger_evaluation`(`evaluation_id`)

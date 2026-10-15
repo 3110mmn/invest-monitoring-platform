@@ -3,7 +3,7 @@
 本書は、投資判断プラットフォームで使用するPostgreSQLデータの意味、型、粒度、制約を定義します。
 
 本書は列の**意味・由来・運用ルール**を担当します。型やNULL可否などの構造情報はAlembicから生成される
-`schema-reference.md` が正本であり、本書の記載が食い違う場合は生成側を正とします。
+`postgresql-schema-reference.md` が正本であり、本書の記載が食い違う場合は生成側を正とします。
 
 スキーマ変更と文書生成の手順は開発ガイドを正本とします。CIは本書のテーブル・列とmigrationの
 不足・余剰を検出します。
@@ -31,8 +31,8 @@
 
 ## 2. テーブル別データ由来一覧（生成主体）
 
-ここでは各テーブルを**誰が生成するか**だけを定義します。外部データの採用元・代替候補・利用方針は
-[取得元と利用方針](sources.md)、個別API項目の変換はETLコードとテストを正本とします。
+ここでは各テーブルを**誰が生成するか**だけを定義します。外部データの具体的な調達判断は
+非公開の運用資料で管理し、個別API項目の変換はETLコードとテストを正本とします。
 
 | PostgreSQLテーブル | データ区分 | 主な生成主体 |
 |---|---|---|
@@ -48,6 +48,10 @@
 | `ingestion_error` | ETL内部生成 | 取得・正規化・検証・保存時のエラー記録 |
 | `investment_target_identifier` | 外部API・システム変換 | 銘柄マスタ同期、識別子管理処理 |
 | `theme_investment_target` | ユーザー入力 | Relationship API |
+| `trigger_rule` | ユーザー入力 | Trigger API。Ruleの安定した同一性と有効状態 |
+| `trigger_rule_version` | ユーザー入力 | Trigger API。条件変更時に新versionを追記 |
+| `trigger_evaluation` | 内部判定 | Trigger Service。判定時の入力を固定 |
+| `trigger_response` | ユーザー入力 | Trigger API。発火を受けた対応方針と理由を追記 |
 
 ### データ区分
 
@@ -57,7 +61,7 @@
 | ユーザー入力 | FastAPIまたは画面から登録・更新する業務データ |
 | システム設定 | 取得元や固定キーなど、アプリケーション運用のために管理する定義 |
 | ETL内部生成 | 取得処理の実行状況、エラー、ハッシュなど、データ来歴を記録する値 |
-| 内部判定 | 取得値と設定済みルールからアプリケーションが計算する値。現行スキーマには保存しない |
+| 内部判定 | Derivedと設定済みRuleから計算する値。評価結果・入力根拠を保存 |
 
 ## 3. テーブル一覧と粒度
 
@@ -75,6 +79,121 @@
 | 取得基盤 | `ingestion_error` | 1実行内の1エラー |
 | 識別子 | `investment_target_identifier` | 1銘柄の1外部識別子と有効期間 |
 | 関連履歴 | `theme_investment_target` | 1テーマと1銘柄の1所属期間 |
+| Strategy | `trigger_rule` | 1つの継続監視Ruleの安定した同一性 |
+| Strategy履歴 | `trigger_rule_version` | 1 Ruleの1条件version |
+| 評価履歴 | `trigger_evaluation` | 1 Rule version × 実行区分 × 入力イベント |
+| 対応 | `trigger_response` | 1評価に対する1回の対応方針・理由・次回確認日 |
+
+## 汎用Trigger
+
+現行の物理スキーマは、財務指標の数値比較を最初のTrigger定義として実装したものである。
+`trigger_rule`から`trigger_response`までの履歴構造は共通基盤だが、条件定義は現時点で
+`financial_metric_comparison`のみを受け付ける。ニュースイベント、公的統計、価格、複合条件は
+このスキーマで実装済みとは扱わない。実際の運用要件をPOCした後、Ruleの安定ID、version、
+evaluation、responseを維持したまま、条件種別ごとの定義へ拡張する。
+
+```text
+trigger_rule（安定したRuleの同一性）
+  └─ trigger_rule_version（その時点で有効な条件定義）
+       └─ trigger_evaluation（入力イベントごとの判定結果）
+            └─ trigger_response（人間・AI・システムの対応方針）
+```
+
+### `trigger_rule`
+
+Ruleの同一性と現在の有効状態だけを持つ。具体的な条件は追記型versionへ分離する。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `rule_id` | BIGINT | Ruleの安定ID |
+| `rule_key` | TEXT | 外部参照用のUUID |
+| `is_active` | BOOLEAN | 評価対象として有効か |
+| `created_at` | TIMESTAMPTZ | Rule作成日時 |
+
+### `trigger_rule_version`
+
+対象・計算定義・指標・比較方法・演算子・閾値・採用理由をversion単位で固定する。
+自由なSQL式は受け付けず、APIが公開する制約付き語彙から選択する。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `rule_version_id` | BIGINT | Rule version ID |
+| `rule_id` | BIGINT | 安定したRule ID |
+| `version` | INTEGER | 1始まりの改訂番号 |
+| `target_id` | BIGINT | ユーザーが選んだ銘柄。保有とは限らない |
+| `definition_key` | TEXT | 計算定義群。現在はfinancial_metric_comparison |
+| `metric_key` | TEXT | revenue / operating_income / net_income |
+| `comparison_type` | TEXT | forecast_variance / yoy / absolute / sign_transition |
+| `operator` | TEXT | lte / gte / crosses_below / crosses_above |
+| `threshold_value` | NUMERIC | 数値比較の閾値。符号転換時はNULL |
+| `rationale` | TEXT | 採用・改訂理由 |
+| `actor_type` | TEXT | human / agent / system / import |
+| `actor_id` | TEXT | 設定主体の識別子。任意 |
+| `created_at` | TIMESTAMPTZ | version登録日時 |
+
+`(rule_id, version)`は一意。条件を変更するときは既存versionを書き換えず、同じ
+`rule_id`に新しいversionを追加する。`trigger_rule.is_active`はRule全体の評価を停止するフラグであり、
+versionの一部ではない。
+
+`threshold_value`の単位は`comparison_type`によって異なる。
+
+- `forecast_variance`: `(actual - forecast) / forecast * 100`のパーセント値。例：`-10`は10%下振れ
+- `yoy`: `(current - prior) / prior * 100`の前年同期比パーセント値
+- `absolute`: 財務開示の当該指標値。通貨単位は取得・正規化定義に従う
+- `sign_transition`: 閾値を保持せず、前回値と現在値の0越えを判
+
+`sign_transition`は`crosses_below`または`crosses_above`のみ、かつ`threshold_value IS NULL`とする。
+それ以外は`lte`または`gte`のみ、かつ閾値を必須とする。この整合性はAPIだけでなく
+DBの`CHECK`制約でも保証する。
+
+### `trigger_evaluation`
+
+入力snapshotはObserved全件の複製ではなく、判定に使用したEvidenceだけを保存する。
+status=firedの評価がReview用Trigger Instanceに対応する。物理テーブルの二重化は行わない。
+同じ実績開示を再処理しても上書き・再通知しない。再生と実運用はmodeで明確に分離。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `evaluation_id` | BIGINT | 評価ID |
+| `rule_version_id` | BIGINT | 判定に使用したRule version |
+| `mode` | TEXT | replay / live |
+| `event_key` | TEXT | 計算定義が作る冪等イベントキー |
+| `as_of_date` | DATE | 評価基準日 |
+| `status` | TEXT | fired / not_fired / unavailable |
+| `reason` | TEXT | 比較可能または対象外・欠損理由 |
+| `observed_value` | NUMERIC | 演算子と比較するDerived値 |
+| `reference_value` | NUMERIC | 前年値・予想値などの参照値。任意 |
+| `evidence` | JSONB | 入力値・来歴・閾値・SQLハッシュ |
+| `evidence_hash` | TEXT | 固定入力JSONのSHA-256 |
+| `definition_version` | TEXT | 評価処理のバージョン |
+| `evaluated_at` | TIMESTAMPTZ | 実際に処理した日時。過去へ戻さない |
+
+`(rule_version_id, mode, event_key)`は一意であり、同じRule versionと入力イベントを再処理しても
+判定履歴を重複生成しない。`as_of_date`は「いつの情報集合で判定したか」、
+`evaluated_at`は「実際にいつ処理したか」を表し、意味を分離する。
+
+`unavailable`は「条件不成立」ではない。必要値の欠損、比較基準の不足、判定時点で未公表など、
+判定不能だった状態を表す。`evidence`には判定に必要な入力と来歴のみを固定し、raw全体を複製しない。
+
+### `trigger_response`
+
+発火した評価を受けて、どの対応方針を選んだかとその理由を追記する。
+これは対応の選択であり、売買約定、調査実施、投資成果等の実行済みAction / Outcomeではない。
+再生評価への記録は模擬対応として扱う。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `response_id` | BIGINT | 記録ID |
+| `evaluation_id` | BIGINT | 発火した評価 |
+| `response_type` | TEXT | continue / investigate / review_allocation / hold |
+| `rationale` | TEXT | その対応方針を選んだ理由 |
+| `next_review_on` | DATE | この発火案件の次回確認日。任意。Rule自体の定期監査日ではない |
+| `actor_type` | TEXT | human / agent / system / import |
+| `actor_id` | TEXT | 記録主体の識別子。任意 |
+| `created_at` | TIMESTAMPTZ | 実際に記録した日時 |
+
+Trigger Rule自体の有用性評価、誤発火、見逃し、Outcomeとの関係を扱うRule監査は現時点で
+実装しない。運用履歴が蓄積し、評価基準が定まった後に`trigger_response`とは別の責務として設計する。
 
 
 ## 4. マスタ

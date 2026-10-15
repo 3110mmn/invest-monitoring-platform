@@ -37,6 +37,10 @@ class FinancialSummaryValues(BaseModel):
     next_forecast_eps: float | None = None
     annual_dividend_per_share: float | None = None
     forecast_annual_dividend_per_share: float | None = None
+    # 投資法人（J-REIT）の1口当たり分配金。通常株の配当とは別項目で、どちらか一方だけが
+    # 入る。開示時点の実額であり、分割の遡及調整は入らない。
+    distribution_per_unit: float | None = None
+    next_forecast_distribution_per_unit: float | None = None
     shares_outstanding: int | None = None
     treasury_shares: int | None = None
     average_shares: int | None = None

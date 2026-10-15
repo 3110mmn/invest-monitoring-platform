@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: invest_staging
+    database: "{{ env_var('BIGQUERY_PROJECT', 'invest-dwh') }}"
+    schema: "{{ env_var('BIGQUERY_STAGING_DATASET', 'invest_staging') }}"
+    tables:
+      - name: security_master
+      - name: financial_actual
+      - name: jquants_financial_disclosure
+        columns:
+          - name: jpx_code
+            data_tests: [not_null]
+          - name: disclosure_number
+            data_tests: [not_null]
+          - name: available_at
+            data_tests: [not_null]

@@ -18,7 +18,15 @@ from app.analytics_connection import (
 from app.config import settings
 from app.database import Connection, get_readiness_db
 from app.errors import error_body, register_error_handlers
-from app.routers.domain import financials, investment_targets, mandates, relationships, securities, themes
+from app.routers.domain import (
+    financials,
+    investment_targets,
+    mandates,
+    relationships,
+    securities,
+    themes,
+    triggers,
+)
 from app.security import SAFE_METHODS, management_key_from_request, verify_management_key
 
 
@@ -160,6 +168,7 @@ app.include_router(investment_targets.router, prefix="/api")
 app.include_router(financials.router, prefix="/api")
 app.include_router(relationships.router, prefix="/api")
 app.include_router(securities.router, prefix="/api")
+app.include_router(triggers.router, prefix="/api")
 if not settings.database_read_only and not settings.public_demo_write_enabled:
     # 公開コンテナには管理処理の依存モジュールも管理Routeも読み込ませない。
     from app.routers.pipeline import data

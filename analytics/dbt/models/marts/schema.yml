@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: fct_metric_comparison
+    description: 時点整合した通期財務実績と会社予想・前年実績の再利用可能な比較Fact
+    columns:
+      - name: comparison_key
+        data_tests: [not_null, unique]
+      - name: security_key
+        data_tests: [not_null]
+      - name: metric_key
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['revenue', 'operating_income', 'net_income']
+      - name: comparison_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['forecast_variance', 'yoy', 'absolute', 'sign_transition']
+      - name: current_available_at
+        data_tests: [not_null]
+

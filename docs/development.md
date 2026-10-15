@@ -114,7 +114,7 @@ ruffとmypyの設定は [`pyproject.toml`](../pyproject.toml) に集約し、採
 
 ## スキーマ文書の生成
 
-型・NULL可否・キー・制約・インデックスは [構造リファレンス](data/schema-reference.md) にAlembic初期migrationから自動生成しています。スキーマを変更したら次を実行してください。
+型・NULL可否・キー・制約・インデックスは [構造リファレンス](data/data-definitions/postgresql-schema-reference.md) にAlembic初期migrationから自動生成しています。スキーマを変更したら次を実行してください。
 
 ```bash
 cd backend

@@ -1,5 +1,8 @@
 -r requirements.txt
+-r requirements-analytics.txt
 
 # 再現可能な探索分析をローカルで実行するためだけの依存。
 jupyterlab>=4,<5
 matplotlib>=3.8,<4
+statsmodels>=0.14,<0.15
+scipy<1.15  # backendのnumpy<2制約と互換性を維持する

@@ -6,7 +6,8 @@
 （Assessment / Decision / Trigger / serving mart）の検討は、採用するまで公開しません。
 物理スキーマの正本は
 [Alembic migration](../../backend/migrations/versions/)、列定義の正本は
-[`schema-data-dictionary.md`](schema-data-dictionary.md)です。
+[`data-definitions/postgresql.md`](data-definitions/postgresql.md)です。Parquetの列定義は
+[`data-definitions/parquet.md`](data-definitions/parquet.md)を参照します。
 
 ## 共通意思決定モデルとの対応
 
@@ -41,8 +42,10 @@
 6. **Action** — 発注、取消、約定、入出金、手数料など実際に実行した行為
 7. **Outcome** — リターン、制約充足、仮説の成否などAction後に観測された結果
 
-外部提供者が加工した値でも、この基盤が外部入力として取得したものはObservedとします。
-自基盤内で生成した値だけをDerivedとします。
+外部提供者が加工した数値でも、この基盤が外部入力として取得したものはObservedとします。
+自基盤内で生成した値だけをDerivedとします。ただし、格付、スコア、レーティング、見通しなど、
+外部主体による**評価・意見そのもの**は単なるObservedへ還元せず、External Assessmentとして扱います。
+「外部主体がその評価を公表した」という出来事と、評価内容を分離して記録します。
 
 ### 評価・判断を観測Factへ混ぜない
 
@@ -63,9 +66,51 @@ Assessment以降は独立した領域として追加し、次を満たす設計�
 - Assessmentと、最終的な採用・却下・上書きであるDecisionを分離する
 - FastAPIのRouterへ判定ロジックを持たせず、PipelineまたはServiceへ委譲する
 
+### Internal AssessmentとExternal Assessment
+
+Assessmentは、評価を生成した主体と責任境界により次の2種類に分けます。これは評価の優劣ではなく、
+定義、更新、監査、利用条件を区別するための分類です。
+
+| 種類 | 意味 | 例 |
+|---|---|---|
+| Internal Assessment | 本基盤の人間、Rule、統計モデル、AIが、追跡可能な入力と定義から生成した評価 | 自前の財務スコア、予測、分類、人間による投資評価 |
+| External Assessment | 本基盤の外部にいる主体が、自らの方法と責任で公表した評価 | 格付機関の発行体・債券格付、外部サービスの財務スコア、証券会社レーティング |
+
+外部評価は、次の2つの意味を同じレコードへ潰しません。
+
+```text
+Observation:
+  「評価機関Xが時点Tに対象YへA+を付与した」という公表Fact
+
+External Assessment:
+  provider=X / subject=Y / rating=A+ / outlook=Stableという評価内容
+```
+
+Internal AssessmentはExternal AssessmentをEvidenceまたはFeatureとして参照できますが、外部評価を
+自動的に自分の判断へ読み替えません。採用、補正、反対評価、無視のいずれであっても、内部評価側に
+利用方法と理由を残します。
+
+Assessment共通では、最低限、評価対象、評価種別、`origin_type`（internal / external）、
+`effective_at`、`available_at`、status、source、actor / providerを追跡します。その上で固有情報を分けます。
+
+- Internal: definition / model / rule / promptのversion、run、入力Evidence、結果、score、rationale、actor
+- External: provider、評価体系、原尺度の値、outlook / watch、評価対象範囲、source document / URL、公表・失効時点
+
+発行体格付と個別債券格付のように評価対象の範囲が違うものを、同じ「銘柄評価」へ集約しません。
+`subject_type`と`subject_key`等で、企業、証券、債務、Themeその他の対象を区別します。
+
+外部評価の原尺度はそのまま保存します。提供者の異なる`A+`、`A`、数値score等を、取得時に共通点数へ
+変換しません。比較用のmappingや正規化scoreが必要になった場合は、version付きのDerivedとして生成し、
+原評価へ遡れるようにします。
+
+External Assessmentの取り込みは、公開ページが存在することだけを理由に自動収集しません。利用条件、
+取得方法、履歴取得可能性、更新頻度、失効・取下げの表現を確認し、継続利用する評価だけをOperational層へ
+昇格させます。物理テーブルは、実際の外部評価をPilotで扱い、必要な対象粒度と履歴要件を確認してから
+確定します。
+
 ## 保存先の責務分離
 
-上の6層は**意味の境界**です。これとは別に、**保存先の境界**を持ちます。両者は独立しており、
+上の7層は**意味の境界**です。これとは別に、**保存先の境界**を持ちます。両者は独立しており、
 同じObservedでも置き場所が分かれます。
 
 | | PostgreSQL | GCS Parquet |
@@ -100,14 +145,16 @@ API層で統合し、Next.jsへ同一の契約で提供します。
 
 ```mermaid
 flowchart LR
-    Sources["J-Quants / external APIs"]
+    Sources["J-Quants / EDINET DB / external APIs"]
     Fetch["Fetch<br/>retry / rate limit"]
     Raw[("GCS raw<br/>JSON.gz / immutable")]
     Transform["Normalize / Validate"]
-    AppDB[("PostgreSQL<br/>Mandate / Theme / Target")]
+    AppDB[("PostgreSQL<br/>Mandate / Theme / Target / Rule")]
     Observed[("GCS lake/reference・observed<br/>Parquet")]
     DuckDB["DuckDB<br/>read-only query engine"]
-    Explore["DuckDB / Notebook<br/>探索・仮説検証"]
+    BQ[("BigQuery<br/>invest_raw / staging")]
+    DBT["dbt<br/>staging → marts"]
+    Explore["DuckDB / Notebook / BigQuery<br/>探索・仮説検証"]
     API["FastAPI"]
     Web["Next.js"]
 
@@ -115,12 +162,17 @@ flowchart LR
     Raw --> Transform
     Transform --> Observed
     Transform -->|"取込メタデータ"| AppDB
-    AppDB -->|"投資枠・テーマ・監視対象"| API
+    AppDB -->|"投資枠・テーマ・監視対象・Rule"| API
     Observed --> DuckDB
     DuckDB -->|"監視対象の価格・財務"| API
     API --> Web
     DuckDB --> Explore
+    Raw --> BQ --> DBT --> Explore
 ```
+
+**rawからの下流は2本あります。** Parquet / DuckDBが日次運用とAPIの読み出しを担い、
+BigQuery / dbtが複数年度・複数銘柄の分析履歴を担います。どちらもrawから再生成でき、
+正本にしません。APIがBigQueryを読まないのは、閲覧ごとにスキャン課金が発生するためです。
 
 | 保存・実行先 | 責務 | 正本性 |
 |---|---|---|
@@ -129,7 +181,9 @@ flowchart LR
 | GCS `lake/observed/` | 型・識別子・時点を統一した全市場の価格・財務Parquet | rawから再生成可能な分析用データセット |
 | GCS `lake/marts/` | 継続運用するAssessmentやDashboardで共有する高コストな派生データ | SQL定義から再生成可能。利用者が決まるまで作らない |
 | PostgreSQL | 投資枠、テーマ、監視対象、ユーザー入力、関係、設定、取込メタデータ | アプリケーション状態の正本。全市場マスタ・価格・財務は持たない |
-| DuckDB | Parquetの絞り込み、結合、集計 | 状態を持たない。正本にしない |
+| DuckDB | Parquetの絞り込み、結合、集計。探索、テスト、APIの読み出し | 状態を持たない。正本にしない |
+| BigQuery `invest_raw` / `invest_staging` | GCS rawとその展開を保持する分析履歴の着地点 | rawから再ロード可能。削除・再構築できる |
+| BigQuery `invest_marts`（dbt） | 複数年度・複数銘柄を横断する再利用可能な変換結果 | dbtモデルが定義の正本。結果は再生成可能 |
 | FastAPI | PostgreSQLとDuckDBの結果をWeb向けAPI契約へ統合 | 保存先ではなく統合境界 |
 
 画面表示では、PostgreSQLから投資枠、テーマ、投資対象、監視対象と外部識別子を取得し、その識別子と期間を
@@ -161,11 +215,15 @@ Parquetの公開に失敗してもrawから冪等に再実行できます。raw�
 | Master | GCS Parquet: `lake/reference/security_master`（全上場銘柄の外部マスタ）。PostgreSQL: `investment_target`（監視対象）、`watchlist_entry`（監視状態）、`theme`、`data_source`、`investment_target_identifier` |
 | Context | PostgreSQL: `capital_allocation_mandate`／`mandate_version`（投資枠の目的と制約をversion管理）、`mandate_target_assignment`（枠内の目標配分）、`capital_budget_version`（総投資予算） |
 | Observed | GCS Parquet: `lake/observed/market_price`, `lake/observed/financial_summary`。**PostgreSQL側のObservedテーブルは廃止済み**で、価格と財務はParquetからしか読みません |
-| Derived | `backend/analytics/derived/*.sql`が計算定義の正本。`preferred_price`が取得元の採用規則を一元化し、`daily_return`と`point_in_time_pbr`はDuckDB／Notebookから動的に計算する |
-| Assessment | 未実装。独立した評価領域として追加 |
+| Derived | `backend/analytics/derived/*.sql`が計算定義の正本。`preferred_price`が取得元の採用規則を一元化し、`daily_return`と`point_in_time_pbr`はDuckDB／Notebookから動的に計算する。横断・長期の変換は`analytics/dbt/`のモデルがBigQueryで生成し、`reconcile_duckdb.py`で両者の一致を確認する |
+| Assessment | 汎用Triggerのルール評価・入力Evidenceを`trigger_evaluation`へ保存 |
 | Decision | 未実装。Assessmentとは分離して追加 |
 | Action | 未実装。注文・取消・約定等の実行Factとして追加 |
-| Outcome | 未実装。Action後の損益・制約充足・仮説の成否として追加 |
+| Outcome | 投資成果の計測は未実装。Trigger発火後の対応方針は`trigger_response`へ追記し、Rule監査は未実装 |
+
+Trigger Operations Pilotでは、ユーザーが採用した確認方針をStrategyとして扱い、投資収益の
+統計的優位性を導入条件にしない。計算定義・Rule・評価・発火・人間の対応は意味を分離する。
+最初の限定実装は[Trigger Operations Pilot](../trigger-operations-pilot.md)を参照。
 
 関連指標、閾値、状態、構造判定、テーマとの意味的な関係は現在の物理スキーマに持たせません。
 必要になった場合も、関連指標のObservedと、判断の定義・結果・Evidenceを別の責務として設計します。

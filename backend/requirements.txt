@@ -13,4 +13,5 @@ numpy<2.0.0
 # GCSはfsspec経由でADCを解決する（DuckDB本体のhttpfsはHMACキーを要求するため）。
 duckdb>=1.1,<2
 gcsfs>=2024.6
+google-cloud-bigquery>=3.25,<4
 certifi>=2024.2

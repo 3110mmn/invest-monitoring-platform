@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.database import Connection
@@ -30,7 +31,7 @@ def _resolve_raw_path(raw_path: str, project_root: Path, raw_dir: Path) -> Path:
     return resolved
 
 
-def _upload_immutable(
+def upload_immutable_object(
     source: Path,
     destination: str,
     *,
@@ -79,6 +80,7 @@ def publish_pending_raw(
     project_root: Path,
     destination_base: str,
     runner: CommandRunner = subprocess.run,
+    max_workers: int = 8,
 ) -> dict[str, int]:
     """Upload available local raw files, then replace DB paths with GCS URIs."""
     if not destination_base.startswith("gs://"):
@@ -95,6 +97,9 @@ def publish_pending_raw(
     ).fetchall()
     uploaded = 0
     missing = 0
+
+    # アップロードする対象を先に確定させる。実体が無い行はここで落とす。
+    pending: list[tuple[int, str, Path, str]] = []
     for row in rows:
         raw_path = str(row["raw_path"])
         source = _resolve_raw_path(raw_path, project_root, raw_dir)
@@ -103,18 +108,41 @@ def publish_pending_raw(
             continue
         relative = source.relative_to(raw_dir.resolve()).as_posix()
         destination = f"{destination_base.rstrip('/')}/{relative}"
-        _upload_immutable(source, destination, runner=runner)
+        pending.append((int(row["ingestion_run_id"]), raw_path, source, destination))
+
+    # **アップロードだけ並列にする。** `gcloud` の起動に1ファイルあたり約3秒かかるため、
+    # 逐次では20年分のバックフィル（約4,900ファイル）で4時間を超える。
+    # `upload_immutable_object` は呼び出しごとに独立しており、`--if-generation-match=0` で
+    # 上書きを拒否するので、並列にしても不変性の保証は変わらない。
+    #
+    # DBの更新は本スレッドへ集める。psycopgの接続はスレッド安全ではなく、
+    # `raw_path` の書き換えは「公開できたことの記録」なので、成功した分だけ順に反映する。
+    def upload(item: tuple[int, str, Path, str]) -> tuple[int, str, str]:
+        run_id, previous, source, destination = item
+        upload_immutable_object(source, destination, runner=runner)
+        return run_id, previous, destination
+
+    results: list[tuple[int, str, str]] = []
+    if pending:
+        workers = min(max_workers, len(pending))
+        if workers <= 1:
+            results = [upload(item) for item in pending]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(upload, pending))
+
+    for run_id, previous, destination in results:
         cursor = connection.execute(
             """
             UPDATE ingestion_run
             SET raw_path = ?
             WHERE ingestion_run_id = ? AND raw_path = ?
             """,
-            (destination, int(row["ingestion_run_id"]), raw_path),
+            (destination, run_id, previous),
         )
         if cursor.rowcount != 1:
             raise RuntimeError(
-                f"ingestion_run changed while publishing raw: {row['ingestion_run_id']}"
+                f"ingestion_run changed while publishing raw: {run_id}"
             )
         uploaded += 1
     connection.commit()

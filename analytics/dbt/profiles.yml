@@ -1,0 +1,11 @@
+invest_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('BIGQUERY_PROJECT', 'invest-dwh') }}"
+      dataset: invest
+      location: "{{ env_var('BIGQUERY_LOCATION', 'australia-southeast1') }}"
+      threads: 4
+      maximum_bytes_billed: 10737418240

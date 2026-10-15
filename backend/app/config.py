@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     # プランが提供しない直近日数と、遡れる年数。Freeは12週間(84日)前まで・2年分
     jquants_history_lag_days: int = 84
     jquants_history_years: int = 2
+    edinetdb_api_key: str | None = None
+    edinetdb_base_url: str = "https://edinetdb.jp/v1"
+    edinetdb_timeout_seconds: float = 60.0
+    # Freeプランの日次上限。CLIの--max-requestsはこの値を超えられない。
+    edinetdb_requests_per_day: int = 100
+    bigquery_project: str | None = None
+    bigquery_location: str = "australia-southeast1"
+    bigquery_raw_dataset: str = "invest_raw"
+    bigquery_staging_dataset: str = "invest_staging"
+    # 誤った全表scanを実行前に拒否するquery単位の上限。load jobと保存容量には適用されない。
+    bigquery_maximum_bytes_billed: int = 10 * 1024 * 1024 * 1024
     # 分析層（Parquet）のルート。`gs://bucket/lake` でもローカルパスでもよい。
     # 配下の `observed/market_price` と `observed/financial_summary` を読む。
     # **価格と財務はここからしか読まない。** 未設定だと両方のAPIが503になる。
@@ -86,6 +97,10 @@ class Settings(BaseSettings):
     @property
     def jquants_sync_script(self) -> Path:
         return Path(__file__).parent.parent / "scripts" / "jquants_sync.py"
+
+    @property
+    def edinetdb_backfill_script(self) -> Path:
+        return Path(__file__).parent.parent / "scripts" / "edinetdb_backfill.py"
 
     @property
     def raw_data_dir(self) -> Path:

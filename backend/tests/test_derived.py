@@ -402,3 +402,260 @@ def test_views_are_readable_from_another_session(tmp_path):
     other = connection.cursor()
 
     assert other.execute("SELECT COUNT(*) FROM preferred_price").fetchone()[0] == 1
+
+
+def _forecast_disclosure(
+    disclosed_day: int,
+    *,
+    forecast_op: int | None = None,
+    next_forecast_op: int | None = None,
+    actual_op: int | None = None,
+    revenue: int | None = None,
+    period_type: str = "2Q",
+    fiscal_year_end_year: int = 2026,
+    number: str = "1",
+    scope: str = "consolidated",
+    standard: str = "JP",
+    disclosed_time: str = "15:00:00",
+) -> dict:
+    """会社予想を載せた開示を1件作る。検証に関係しない列は既定値で埋める。"""
+    return {
+        "jpx_code": "72030",
+        "target_key": "7203.T",
+        "source_key": "jquants",
+        "disclosure_number": number,
+        "disclosed_date": date(2026, 7, disclosed_day),
+        "disclosed_time": disclosed_time,
+        "document_type": f"{period_type}FinancialStatements_Consolidated_JP",
+        "fiscal_period_type": period_type,
+        "period_start": date(fiscal_year_end_year - 1, 4, 1),
+        "period_end": date(fiscal_year_end_year, 3, 31),
+        "fiscal_year_start": date(fiscal_year_end_year - 1, 4, 1),
+        "fiscal_year_end": date(fiscal_year_end_year, 3, 31),
+        "accounting_standard": standard,
+        "reporting_scope": scope,
+        "forecast_operating_income": forecast_op,
+        "next_forecast_operating_income": next_forecast_op,
+        "operating_income": actual_op,
+        "revenue": revenue,
+        "source_record_hash": number,
+        "ingestion_run_id": int(number),
+        "built_at": datetime(2026, 7, disclosed_day, tzinfo=UTC),
+    }
+
+
+def _forecast_rows(tmp_path, disclosures: list[dict], name: str) -> list[dict]:
+    """会社予想のDerivedを計算して行を返す。"""
+    _write_financials(tmp_path, disclosures)
+    prices = tmp_path / "observed" / "market_price" / "year=2026"
+    prices.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([], schema=PRICE_SCHEMA), prices / "part-0.parquet")
+    master = tmp_path / "reference" / "security_master"
+    master.mkdir(parents=True)
+    pq.write_table(
+        pa.Table.from_pylist([], schema=SECURITY_MASTER_SCHEMA), master / "part-0.parquet"
+    )
+    connection = connect_lake(str(tmp_path))
+    connection.execute(
+        "CREATE OR REPLACE VIEW point_in_time_forecast AS "
+        + load_definition("point_in_time_forecast")
+    )
+    relation = connection.sql(load_definition(name))
+    names = relation.columns
+    return [dict(zip(names, row, strict=True)) for row in relation.fetchall()]
+
+
+def test_forecast_is_not_visible_on_its_disclosure_day(tmp_path):
+    """予想が使えるのは開示の翌日から。
+
+    開示時刻と市場の前後を日付だけでは判定できないため、保守側へ倒す。
+    `point_in_time_pbr` と同じ規則。
+    """
+    rows = _forecast_rows(
+        tmp_path, [_forecast_disclosure(10, forecast_op=500)], "point_in_time_forecast"
+    )
+
+    assert [row["as_of_date"] for row in rows] == [date(2026, 7, 11)]
+
+
+def test_each_date_resolves_to_exactly_one_forecast(tmp_path):
+    """有効期間が重ならず、任意の基準日で引ける予想が1件に決まること。
+
+    ROW_NUMBERで「最新」を取る実装だと基準日を変えたときに壊れるため、
+    `superseded_at` で区間を持たせている。その区間が連続していることを確かめる。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(1, forecast_op=100, number="1"),
+            _forecast_disclosure(10, forecast_op=250, number="2"),
+            _forecast_disclosure(20, forecast_op=750, number="3"),
+        ],
+        "point_in_time_forecast",
+    )
+
+    by_seq = {row["forecast_seq"]: row for row in rows}
+    assert by_seq[1]["superseded_at"] == by_seq[2]["as_of_date"]
+    assert by_seq[2]["superseded_at"] == by_seq[3]["as_of_date"]
+    assert by_seq[3]["superseded_at"] is None
+
+    on_date = date(2026, 7, 15)
+    visible = [
+        row
+        for row in rows
+        if row["as_of_date"] <= on_date
+        and (row["superseded_at"] is None or on_date < row["superseded_at"])
+    ]
+    assert [row["forecast_operating_income"] for row in visible] == [250]
+
+
+def test_later_forecast_does_not_change_earlier_point_in_time(tmp_path, tmp_path_factory):
+    """予想を後から追加しても、過去時点で見えていた予想が変わらないこと。
+
+    先読み防止の本体。将来の開示が過去の評価を書き換えるなら、この分析は成立しない。
+    """
+    before = _forecast_rows(
+        tmp_path,
+        [_forecast_disclosure(1, forecast_op=100, number="1")],
+        "point_in_time_forecast",
+    )
+    after = _forecast_rows(
+        tmp_path_factory.mktemp("after"),
+        [
+            _forecast_disclosure(1, forecast_op=100, number="1"),
+            _forecast_disclosure(20, forecast_op=750, number="2"),
+        ],
+        "point_in_time_forecast",
+    )
+
+    on_date = date(2026, 7, 10)
+
+    def visible(rows: list[dict]) -> list[int]:
+        return [
+            row["forecast_operating_income"]
+            for row in rows
+            if row["as_of_date"] <= on_date
+            and (row["superseded_at"] is None or on_date < row["superseded_at"])
+        ]
+
+    assert visible(before) == visible(after) == [100]
+
+
+def test_same_day_disclosures_are_ordered_deterministically(tmp_path):
+    """同日に複数開示があっても1件に畳まれること。
+
+    実データで102行が同日2件だった。日付だけでは順序が決まらないので、
+    開示時刻と開示番号まで見る。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(
+                10, forecast_op=100, number="1", disclosed_time="09:00:00"
+            ),
+            _forecast_disclosure(
+                10, forecast_op=300, number="2", disclosed_time="15:00:00"
+            ),
+        ],
+        "point_in_time_forecast",
+    )
+
+    assert [row["forecast_operating_income"] for row in rows] == [300]
+
+
+def test_forecast_disclosed_after_actual_is_not_evaluated(tmp_path):
+    """実績が出た後に出た予想は、採点に使われないこと。
+
+    最後の予想を会社予想として評価すると、実測でMAPEが28.7%から17.0%へ下がる。
+    4割の精度向上に見えるが全て後知恵である。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(1, forecast_op=100, number="1"),
+            _forecast_disclosure(
+                20,
+                actual_op=900,
+                revenue=10000,
+                period_type="FY",
+                number="2",
+            ),
+            # 実績開示より後に出た予想。採点に使ってはいけない。
+            _forecast_disclosure(25, forecast_op=890, number="3"),
+        ],
+        "forecast_accuracy",
+    )
+
+    assert [row["forecast_operating_income"] for row in rows] == [100]
+
+
+def test_error_is_scaled_by_revenue_not_operating_income(tmp_path):
+    """誤差を売上でスケールすること。
+
+    実績営業利益を分母にすると、着地がゼロ近傍の企業で誤差が発散する。実測では
+    中央値16.8%に対して最大70,800%だった。売上ならゼロ近傍になりにくい。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(1, forecast_op=500, number="1"),
+            # 営業利益がほぼゼロへ着地。MAPEなら4,900%になる。
+            _forecast_disclosure(
+                20, actual_op=10, revenue=10000, period_type="FY", number="2"
+            ),
+        ],
+        "forecast_accuracy",
+    )
+
+    (row,) = rows
+    assert row["error_pct_of_revenue"] == pytest.approx(-4.9)
+    assert row["outcome"] == "miss"
+
+
+def test_mismatched_accounting_standard_is_not_compared(tmp_path):
+    """会計基準が違う予想と実績を比べないこと。
+
+    基準が違うと営業利益の定義が変わる。0で埋めず理由を返す。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(1, forecast_op=500, number="1", standard="JP"),
+            _forecast_disclosure(
+                20,
+                actual_op=600,
+                revenue=10000,
+                period_type="FY",
+                number="2",
+                standard="IFRS",
+            ),
+        ],
+        "forecast_accuracy",
+    )
+
+    (row,) = rows
+    assert row["comparison_status"] == "accounting_standard_mismatch"
+    assert row["error_pct_of_revenue"] is None
+
+
+def test_corrected_actual_does_not_replace_the_first_one(tmp_path):
+    """実績の訂正開示が出ても、最初に出た実績で採点すること。
+
+    訂正後の値を使うと、当時見えていなかった数字で予想を採点することになる。
+    """
+    rows = _forecast_rows(
+        tmp_path,
+        [
+            _forecast_disclosure(1, forecast_op=500, number="1"),
+            _forecast_disclosure(
+                20, actual_op=600, revenue=10000, period_type="FY", number="2"
+            ),
+            _forecast_disclosure(
+                25, actual_op=400, revenue=10000, period_type="FY", number="3"
+            ),
+        ],
+        "forecast_accuracy",
+    )
+
+    (row,) = rows
+    assert row["actual_operating_income"] == 600

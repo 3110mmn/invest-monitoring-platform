@@ -1,4 +1,5 @@
 .venv/
+.venv-dbt/
 __pycache__/
 *.db
 *.db.generation
@@ -27,7 +28,17 @@ backend/.env.neon.*
 # 探索分析の一時出力。再生成でき、分析結果の正本ではない。
 research/outputs/*
 !research/outputs/.gitkeep
+research/inputs/*
+!research/inputs/README.md
+!research/inputs/reit_asset_types.example.csv
+!research/inputs/reit_asset_type_codes.example.csv
 research/**/.ipynb_checkpoints/
+
+# 分析の入力。外部から取得したデータと手で作った分類表が入る。利用条件が取得元ごとに
+# 異なり、再配布できないものが混ざるため、列構成だけを示す `*.example.csv` を残して
+# 中身はコミットしない。
+research/inputs/*
+!research/inputs/*.example.csv
 
 # Next.js 16 が `npm run dev` のたびに生成するエージェント向け設定。成果物ではない。
 # `frontend/AGENTS.md` は公開スナップショットの除外対象（ルートの AGENTS.md）とは
@@ -46,6 +57,12 @@ frontend/out/
 dist/
 build/
 
+# dbtのコンパイル成果物・実行ログ。SQLとテスト定義だけを追跡する。
+analytics/dbt/target/
+analytics/dbt/logs/
+analytics/dbt/dbt_packages/
+analytics/dbt/.user.yml
+
 # 作業メモ。計画と外部仕様は履歴を追いたいので追跡し、それ以外は追跡しない。
 # 公開スナップショットからは scripts/export_public.py が memo/ ごと除外する。
 memo/*
@@ -53,6 +70,9 @@ memo/*
 !memo/infrastructure/
 !memo/jquants/
 !memo/causal-models/
+!memo/sources/
+# 設計判断を変えた実測と、分析で踏んだ罠。ROADMAPから参照するので追跡する。
+!memo/測定結果/
 .obsidian/
 gha-creds-*.json
 

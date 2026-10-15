@@ -6,6 +6,7 @@ import { getMandateReviewQueue } from "@/lib/api";
 import { todayInJapan } from "@/lib/review-cycle";
 import { PUBLIC_READ_ONLY } from "@/lib/runtime";
 import type { MandateReviewItem } from "@/types";
+import TriggerQueue from "@/components/TriggerQueue";
 
 export default function Dashboard() {
   const [reviewQueue, setReviewQueue] = useState<MandateReviewItem[]>([]);
@@ -35,7 +36,7 @@ export default function Dashboard() {
 
       <section className="rounded-lg border bg-white p-5">
         <h2 className="font-semibold">トリガー発火</h2>
-        <p className="mt-2 text-sm text-gray-600">発火履歴の取得・表示は未実装です。Trigger Instance の実装後にここへ表示します。</p>
+        <TriggerQueue />
       </section>
 
       <section className="rounded-lg border border-amber-200 bg-amber-50 p-5">
