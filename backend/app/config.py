@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     bigquery_location: str = "australia-southeast1"
     bigquery_raw_dataset: str = "invest_raw"
     bigquery_staging_dataset: str = "invest_staging"
+    bigquery_marts_dataset: str = "invest_marts"
     # 誤った全表scanを実行前に拒否するquery単位の上限。load jobと保存容量には適用されない。
     bigquery_maximum_bytes_billed: int = 10 * 1024 * 1024 * 1024
     # 分析層（Parquet）のルート。`gs://bucket/lake` でもローカルパスでもよい。

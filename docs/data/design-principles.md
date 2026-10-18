@@ -170,9 +170,14 @@ flowchart LR
     Raw --> BQ --> DBT --> Explore
 ```
 
-**rawからの下流は2本あります。** Parquet / DuckDBが日次運用とAPIの読み出しを担い、
-BigQuery / dbtが複数年度・複数銘柄の分析履歴を担います。どちらもrawから再生成でき、
-正本にしません。APIがBigQueryを読まないのは、閲覧ごとにスキャン課金が発生するためです。
+**rawからの下流は2本あり、互いを参照しません。** BigQueryはParquetを読まず、DuckDBは
+BigQueryを読みません。どちらもGCS rawだけを入力とし、再生成できるので正本にしません。
+Parquet / DuckDBが日次運用とAPIの読み出しを、BigQuery / dbtが複数年度・複数銘柄の
+分析履歴を担います。APIがBigQueryを読まないのは、閲覧ごとにスキャン課金が発生するためです。
+
+**この図は保存の責務であって、実行順序ではありません。** 誰がいつ動かすかは
+[アーキテクチャ](../architecture.md)が扱います。取得の定時実行はGitHub Actions、
+取得からTrigger評価までを1本に束ねた検証はローカルのAirflowが担います。
 
 | 保存・実行先 | 責務 | 正本性 |
 |---|---|---|
@@ -217,9 +222,9 @@ Parquetの公開に失敗してもrawから冪等に再実行できます。raw�
 | Observed | GCS Parquet: `lake/observed/market_price`, `lake/observed/financial_summary`。**PostgreSQL側のObservedテーブルは廃止済み**で、価格と財務はParquetからしか読みません |
 | Derived | `backend/analytics/derived/*.sql`が計算定義の正本。`preferred_price`が取得元の採用規則を一元化し、`daily_return`と`point_in_time_pbr`はDuckDB／Notebookから動的に計算する。横断・長期の変換は`analytics/dbt/`のモデルがBigQueryで生成し、`reconcile_duckdb.py`で両者の一致を確認する |
 | Assessment | 汎用Triggerのルール評価・入力Evidenceを`trigger_evaluation`へ保存 |
-| Decision | 未実装。Assessmentとは分離して追加 |
+| Decision | 独立テーブルは設けない。事前採用したTriggerの発火時方針と、人間の承認・上書き・保留で表現 |
 | Action | 未実装。注文・取消・約定等の実行Factとして追加 |
-| Outcome | 投資成果の計測は未実装。Trigger発火後の対応方針は`trigger_response`へ追記し、Rule監査は未実装 |
+| Outcome | 投資成果の計測は未実装。Trigger発火後の確認・上書き履歴は`trigger_response`へ追記し、Rule監査は未実装 |
 
 Trigger Operations Pilotでは、ユーザーが採用した確認方針をStrategyとして扱い、投資収益の
 統計的優位性を導入条件にしない。計算定義・Rule・評価・発火・人間の対応は意味を分離する。

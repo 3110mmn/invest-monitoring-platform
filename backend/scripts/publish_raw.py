@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings
 from app.database import connect_database
-from app.etl.raw_publisher import publish_pending_raw
+from app.etl.raw_publisher import publish_pending_raw, upload_immutable_object_with_gcs
 
 
 def main() -> None:
@@ -23,6 +23,7 @@ def main() -> None:
             raw_dir=settings.raw_data_dir,
             project_root=project_root,
             destination_base=settings.raw_data_uri,
+            uploader=upload_immutable_object_with_gcs,
         )
     except Exception:
         connection.rollback()

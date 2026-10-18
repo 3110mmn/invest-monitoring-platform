@@ -28,6 +28,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--staging-dataset", default=settings.bigquery_staging_dataset)
     parser.add_argument("--after-run-id", type=int)
     parser.add_argument(
+        "--only-new",
+        action="store_true",
+        help="BigQueryにロード済みの最大ingestion_run_idより後だけを処理する",
+    )
+    parser.add_argument(
+        "--skip-exit-code",
+        type=int,
+        default=0,
+        help="--only-newで新規rawが無い場合の終了コード（Airflowでは99）",
+    )
+    parser.add_argument(
         "--maximum-bytes-billed",
         type=int,
         default=settings.bigquery_maximum_bytes_billed,
@@ -61,13 +72,24 @@ def main() -> int:
         warehouse_settings,
         maximum_bytes_billed=args.maximum_bytes_billed,
     )
+    loader.ensure_infrastructure()
+    after_run_id = args.after_run_id
+    if args.only_new:
+        if after_run_id is not None:
+            print("--only-newと--after-run-idは同時に指定できません", file=sys.stderr)
+            return 2
+        after_run_id = loader.latest_jquants_ingestion_run_id()
+
     connection = connect_database(read_only=True)
     try:
-        runs = find_jquants_financial_runs(connection, after_run_id=args.after_run_id)
+        runs = find_jquants_financial_runs(connection, after_run_id=after_run_id)
     finally:
         connection.close()
 
-    loader.ensure_infrastructure()
+    if args.only_new and not runs:
+        print(json.dumps({"discovered_runs": 0, "loaded_responses": 0, "skipped": "no_new_raw"}))
+        return args.skip_exit_code
+
     loaded = loader.load_jquants(
         runs,
         project_root=PROJECT_ROOT,

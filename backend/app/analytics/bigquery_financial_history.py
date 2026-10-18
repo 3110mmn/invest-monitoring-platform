@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import re
 import subprocess
 import uuid
@@ -362,17 +363,73 @@ WHEN NOT MATCHED THEN
 """.strip()
 
 
+def _storage_client(storage: Any) -> Any:
+    """GCSクライアントを作る。プロジェクトを明示する。
+
+    **ADCがユーザー資格情報の場合、SDKはプロジェクトを推定できない。** 実際に
+    `OSError: Project was not passed and could not be determined from the
+    environment` で落ちた。`GOOGLE_CLOUD_PROJECT` を増やすより、既に持っている
+    設定から渡す方が、環境変数の取り違えに依存しない。
+    """
+    from app.config import settings
+
+    project = settings.bigquery_project or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    return storage.Client(project=project) if project else storage.Client()
+
+
+def _read_object_with_gcs(uri: str) -> bytes:
+    """GCS SDKでオブジェクトを読む。gcloud CLIを持たないコンテナ向け。
+
+    `raw_publisher.upload_immutable_object_with_gcs` と対になる読み出し経路である。
+    書き込み側はSDK版を用意していたが、読み出し側はCLIのままだった。Airflowの
+    コンテナにはgcloudが無く、`FileNotFoundError: 'gcloud'` で落ちる。
+    """
+    from google.cloud import storage  # type: ignore[attr-defined]
+
+    bucket_name, _, object_name = uri[5:].partition("/")
+    return _storage_client(storage).bucket(bucket_name).blob(object_name).download_as_bytes()
+
+
 def _read_command_bytes(runner: CommandRunner, uri: str) -> bytes:
-    result = runner(["gcloud", "storage", "cat", uri], capture_output=True)
+    """gcloud CLIで読む。無い環境ではGCS SDKへ退避する。
+
+    **CLIを優先するのは、`runner` を差し替えるテストを壊さないため。** CLIが存在
+    しない場合だけSDKを使う。どちらの経路でも同じバイト列を返す。
+    """
+    try:
+        result = runner(["gcloud", "storage", "cat", uri], capture_output=True)
+    except FileNotFoundError:
+        if not uri.startswith("gs://"):
+            raise
+        return _read_object_with_gcs(uri)
     if result.returncode != 0:
         stderr = result.stderr.decode() if isinstance(result.stderr, bytes) else result.stderr
         raise RuntimeError(f"failed to read {uri}: {stderr.strip()}")
     return result.stdout if isinstance(result.stdout, bytes) else result.stdout.encode()
 
 
+def _list_objects_with_gcs(location: str) -> list[str]:
+    """GCS SDKでオブジェクトを列挙する。gcloud CLIを持たないコンテナ向け。"""
+    from google.cloud import storage  # type: ignore[attr-defined]
+
+    bucket_name, _, prefix = location[5:].partition("/")
+    client = _storage_client(storage)
+    return [
+        f"gs://{bucket_name}/{blob.name}"
+        for blob in client.list_blobs(bucket_name, prefix=prefix)
+    ]
+
+
 def discover_manifests(location: str, *, runner: CommandRunner = subprocess.run) -> list[str]:
     if location.startswith("gs://"):
-        result = runner(["gcloud", "storage", "ls", "--recursive", location], capture_output=True)
+        try:
+            result = runner(["gcloud", "storage", "ls", "--recursive", location], capture_output=True)
+        except FileNotFoundError:
+            return sorted(
+                name
+                for name in _list_objects_with_gcs(location)
+                if "/endpoint=" in name and name.endswith(".json")
+            )
         if result.returncode != 0:
             stderr = result.stderr.decode() if isinstance(result.stderr, bytes) else result.stderr
             raise RuntimeError(f"failed to list {location}: {stderr.strip()}")
@@ -574,6 +631,29 @@ class BigQueryFinancialHistoryLoader:
                     job_config=self.query_job_config,
                 )
             )
+
+    def latest_jquants_ingestion_run_id(self) -> int | None:
+        """Return the latest source run already materialized in BigQuery.
+
+        This is the inexpensive watermark used by the daily orchestrator. It
+        prevents dbt and Trigger evaluation when PostgreSQL has no newer raw
+        financial archive.
+        """
+        result = _wait(
+            self.client.query(
+                f"""
+                SELECT MAX(ingestion_run_id) AS ingestion_run_id
+                FROM `{self.settings.raw_table}`
+                WHERE source = 'jquants' AND endpoint = 'financial_summary'
+                """,
+                location=self.settings.location,
+                job_config=self.query_job_config,
+            )
+        )
+        rows = list(result)
+        if not rows or rows[0]["ingestion_run_id"] is None:
+            return None
+        return int(rows[0]["ingestion_run_id"])
 
     def validate_point_in_time(self) -> list[PointInTimeCheck]:
         result = _wait(

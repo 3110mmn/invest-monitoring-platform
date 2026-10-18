@@ -27,7 +27,8 @@
 | Cloud | Cloud Run、Neon PostgreSQL、GCS、Artifact Registry、Secret Manager、IAMを利用 |
 | 運用 | GitHub ActionsによるCI/CD・日次ETL・バックアップ、readiness、復元検証 |
 | 分析基盤 | GCS raw → BigQuery → dbt（staging / intermediate / marts）。point-in-timeの不変条件をテストで固定 |
-| 品質 | PostgreSQLを使うバックエンドテスト329件、フロントエンドテスト5件、型・lint・build検証 |
+| オーケストレーション | Airflowで取得→BigQuery→dbt品質ゲート→Trigger評価を1本のDAGに。**ローカルstandaloneでの検証段階**で、常時稼働はGitHub Actionsが担う |
+| 品質 | PostgreSQLを使うバックエンドテスト346件、フロントエンドテスト5件、型・lint・build検証 |
 
 ### dbt docs（モデルの依存グラフ・テスト・SQL）
 
@@ -58,8 +59,9 @@
 意思決定を扱う領域は多くありますが、投資には次が揃っています。
 
 - **データが比較的揃っている** — 株価・財務・開示が機械可読な形で入手できる
-- **外部データで検証できる** — 判断の帰結が価格という客観的な系列で測れる
-- **観測から効果検証まで一気通貫で追える** — 判断とその結果が同じ時間軸に乗る
+- **検証の期限が自然に来る** — 決算や月次開示で、仮説の当否が定期的に判明する
+- **時点整合が成立しないと答えが変わる** — 後から知った情報で判断を評価してしまう問題が、構造的に発生する題材である
+
 
 `Context → Observation → Assessment → Decision → Action → Outcome → Learn` の閉ループを、
 実データで一周させられる題材だと考えました。各層の定義は
@@ -127,8 +129,7 @@
   `unavailable`）と当時のEvidence、発火後の対応方針を履歴として残す。Ruleの変更は
   追記型versionで扱い、過去の判定は書き換えない
 - **時点整合を保って予想と実績を比べる** — 会社予想は期中に何度も出し直されるため、各予想へ
-  有効期間を持たせ、「その時点で見えていた予想」だけを使う。最後の予想で採点すると誤差が
-  見かけ上4割改善するため、dbtのテストで後知恵の混入を検出する
+  有効期間を持たせ、「その時点で見えていた予想」だけを使う。
 - **公開デモで入力を試せる** — 架空データ環境で、期限付きの投資枠だけ誰でも作成・編集できる。
   書き込める範囲をDBロールとHTTP層の両方で絞る
 - **実データは非公開の管理APIから更新する**
@@ -166,9 +167,16 @@ flowchart LR
 **rawが原本で、ParquetもPostgreSQLもBigQueryも派生です。** PostgreSQLは「何を監視しているか」を
 持ち、Parquetは「その値がいくらだったか」を持ちます。価格と財務はParquetからしか読みません。
 
-**rawからの下流は2本あります。** Parquet / DuckDBが日次運用とAPIの読み出しを担い、
-BigQuery / dbtが複数年度・複数銘柄を横断する変換と分析履歴を担います。APIがBigQueryを
-読まないのは、閲覧のたびにスキャン課金が発生するためです。
+**rawからの下流は2本あり、互いを参照しません。** どちらもGCS rawを入力とし、
+BigQueryはParquetを読まず、DuckDBはBigQueryを読みません。
+
+```text
+GCS raw ─┬─→ Parquet → DuckDB → API・画面（日次運用と読み出し）
+         └─→ BigQuery → dbt（複数年度・複数銘柄の変換と分析履歴）
+```
+
+同じrawから2通りに組み立てるのは、求めるものが違うためです。APIは閲覧のたびに
+課金されない読み出しを、分析は横断と長期の履歴を必要とします。
 
 公開APIと管理APIは**同じイメージ・同じコード**を使い、Cloud Runサービス・DBロール・環境変数・IAMで権限を分けます。
 
@@ -218,7 +226,11 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 | 分析層（読み出し） | GCS Parquet / DuckDB / pyarrow |
 | 分析層（変換・履歴） | BigQuery / dbt（staging / intermediate / marts） |
 | データ取得 | J-Quants API / EDINET DB API / yfinance |
-| インフラ | Cloud Run / Cloud Storage / Artifact Registry / Secret Manager / IAM / Neon |
+| オーケストレーション | Airflow（ローカルstandaloneで検証） / GitHub Actions（定時実行） |
+| 実行基盤 | Cloud Run（公開API・管理API・Frontend） |
+| ストレージ | Cloud Storage（raw・Parquet・バックアップ） / Neon PostgreSQL |
+| 配布・機密 | Artifact Registry（イメージ） / Secret Manager（接続情報） |
+| 権限分離 | IAM（サービスアカウント単位でバケットを分離） / PostgreSQLロール |
 | CI/CD | GitHub Actions（lint・型・テスト・Dockerビルド / deploy / 日次ETL / backup） |
 
 ### 設計上の判断
@@ -262,7 +274,8 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 |---|---|
 | システム構成・権限境界 | [docs/architecture.md](docs/architecture.md) |
 | データ層の論理設計 | [docs/data/design-principles.md](docs/data/design-principles.md) |
-| PostgreSQL列の意味・粒度・単位 | [docs/data/data-definitions/postgresql.md](docs/data/data-definitions/postgresql.md) |
-| PostgreSQLの型・制約・ER図（自動生成） | [docs/data/data-definitions/postgresql-schema-reference.md](docs/data/data-definitions/postgresql-schema-reference.md) |
-| Parquetデータセットの列・由来・変換 | [docs/data/data-definitions/parquet.md](docs/data/data-definitions/parquet.md) |
+| 保存先ごとの列定義（PostgreSQL / Parquet / BigQuery） | [docs/data/data-definitions/](docs/data/data-definitions/README.md) |
+| 継続監視条件の判定契約と運用範囲 | [docs/trigger-operations-pilot.md](docs/trigger-operations-pilot.md) |
+| 取得からTrigger評価までの実行制御 | [orchestration/airflow/README.md](orchestration/airflow/README.md) |
+| 探索分析の記録と測定結果 | [research/README.md](research/README.md) |
 | セットアップ・検証 | [docs/development.md](docs/development.md) |

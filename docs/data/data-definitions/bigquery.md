@@ -140,6 +140,11 @@ cd backend
 通期実績を比較します。四半期中に修正された直前予想との差は同じ意味ではないため、現時点では
 混ぜません。
 
+Operational Trigger評価では、FastAPIが対象銘柄・指標・比較種別・評価基準日でこのFactを絞り、
+Ruleの演算子・閾値を適用します。EvaluationはPostgreSQLへimmutableに保存され、以後のWeb閲覧は
+BigQueryを再queryしません。`comparison_key + current/reference disclosure number`をevent keyへ含め、
+同じRule version・mode・Factの再評価を重複保存しません。
+
 2026-10-13の初回`dbt build`では135,700行を生成し、source必須項目、一意性、列挙値、
 参照日時、比較基準の11テストを含む全16 nodeが成功しました。
 

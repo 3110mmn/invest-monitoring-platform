@@ -399,6 +399,11 @@ SET_COLUMN_DEFAULT = re.compile(
     r"ALTER\s+COLUMN\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+SET\s+DEFAULT\s+(.+)$",
     re.IGNORECASE | re.DOTALL,
 )
+SET_COLUMN_NOT_NULL = re.compile(
+    r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
+    r"ALTER\s+COLUMN\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+SET\s+NOT\s+NULL$",
+    re.IGNORECASE,
+)
 DROP_CONSTRAINT = re.compile(
     r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
     r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z_][A-Za-z0-9_]*)",
@@ -496,6 +501,14 @@ def parse_schema(schema_path: Path | str | list[Path]) -> Schema:
                     if column is not None:
                         column.default = " ".join(default.split())
                     continue
+                not_null_match = SET_COLUMN_NOT_NULL.match(statement)
+                if not_null_match:
+                    table_name, column_name = not_null_match.groups()
+                    table = next((item for item in tables if item.name == table_name), None)
+                    column = table.column(column_name) if table is not None else None
+                    if column is not None:
+                        column.not_null = True
+                    continue
                 drop_constraint_match = DROP_CONSTRAINT.match(statement)
                 if drop_constraint_match:
                     table_name, constraint_name = drop_constraint_match.groups()
@@ -507,6 +520,20 @@ def parse_schema(schema_path: Path | str | list[Path]) -> Schema:
                         table.foreign_keys = [
                             fk for fk in table.foreign_keys if fk.columns != [column_name]
                         ]
+                    check_suffix = "_check"
+                    if (
+                        table is not None
+                        and constraint_name.startswith(prefix)
+                        and constraint_name.endswith(check_suffix)
+                    ):
+                        column_name = constraint_name[len(prefix) : -len(check_suffix)]
+                        table.table_checks = [
+                            check for check in table.table_checks
+                            if not re.search(rf"\b{re.escape(column_name)}\b", check)
+                        ]
+                        column = table.column(column_name)
+                        if column is not None:
+                            column.check_values = []
                     continue
                 foreign_key_match = ADD_FOREIGN_KEY_CONSTRAINT.match(statement)
                 if foreign_key_match:

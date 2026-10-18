@@ -145,3 +145,17 @@ J-Quantsからのアーカイブ、Parquetの組み立て、Derivedの計算、�
 
 設計上の理由は[アーキテクチャ](architecture.md)と[データ層の論理設計](data/design-principles.md)に
 あります。
+
+### Airflowで一連の流れを手元で試す
+
+取得からTrigger評価までを1本のDAGで実行する構成を、ローカルの`standalone`で確認できます。
+起動手順と前提は[orchestration/airflow/README.md](../orchestration/airflow/README.md)が正本です。
+
+```bash
+make airflow-up     # http://localhost:8081
+make airflow-logs
+make airflow-down
+```
+
+**ローカル検証用で、常時稼働させる構成ではありません。** スケジューラが止まっている間の実行は
+`catchup=False`のため後から遡りません。日次の取得はGitHub Actionsの`daily-update.yml`が担います。

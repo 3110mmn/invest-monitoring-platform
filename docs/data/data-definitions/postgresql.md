@@ -50,8 +50,10 @@
 | `theme_investment_target` | ユーザー入力 | Relationship API |
 | `trigger_rule` | ユーザー入力 | Trigger API。Ruleの安定した同一性と有効状態 |
 | `trigger_rule_version` | ユーザー入力 | Trigger API。条件変更時に新versionを追記 |
+| `trigger_rule_condition` | ユーザー入力 | Trigger API。Rule version内の条件を順序付きで追記 |
+| `trigger_rule_assignment` | ユーザー入力 | Trigger API。Rule versionの適用scopeを固定 |
 | `trigger_evaluation` | 内部判定 | Trigger Service。判定時の入力を固定 |
-| `trigger_response` | ユーザー入力 | Trigger API。発火を受けた対応方針と理由を追記 |
+| `trigger_response` | ユーザー入力 | Trigger API。発火時方針への承認・上書き・保留と理由を追記 |
 
 ### データ区分
 
@@ -80,23 +82,27 @@
 | 識別子 | `investment_target_identifier` | 1銘柄の1外部識別子と有効期間 |
 | 関連履歴 | `theme_investment_target` | 1テーマと1銘柄の1所属期間 |
 | Strategy | `trigger_rule` | 1つの継続監視Ruleの安定した同一性 |
-| Strategy履歴 | `trigger_rule_version` | 1 Ruleの1条件version |
-| 評価履歴 | `trigger_evaluation` | 1 Rule version × 実行区分 × 入力イベント |
+| Strategy履歴 | `trigger_rule_version` | 1 Ruleの条件結合・方針を固定したversion |
+| Strategy条件 | `trigger_rule_condition` | 1 Rule versionを構成する1条件 |
+| Strategy適用 | `trigger_rule_assignment` | 1 Rule versionの1適用scope |
+| 評価履歴 | `trigger_evaluation` | 1 Rule version × 展開後Target × 実行区分 × 入力イベント |
 | 対応 | `trigger_response` | 1評価に対する1回の対応方針・理由・次回確認日 |
 
 ## 汎用Trigger
 
 現行の物理スキーマは、財務指標の数値比較を最初のTrigger定義として実装したものである。
 `trigger_rule`から`trigger_response`までの履歴構造は共通基盤だが、条件定義は現時点で
-`financial_metric_comparison`のみを受け付ける。ニュースイベント、公的統計、価格、複合条件は
-このスキーマで実装済みとは扱わない。実際の運用要件をPOCした後、Ruleの安定ID、version、
+`financial_metric_comparison`のみを受け付ける。同一Rule内の財務条件はALL / ANYで複数指定できるが、
+ニュースイベント、公的統計、価格との異種条件結合は実装済みとは扱わない。実際の運用要件をPOCした後、Ruleの安定ID、version、
 evaluation、responseを維持したまま、条件種別ごとの定義へ拡張する。
 
 ```text
 trigger_rule（安定したRuleの同一性）
-  └─ trigger_rule_version（その時点で有効な条件定義）
-       └─ trigger_evaluation（入力イベントごとの判定結果）
-            └─ trigger_response（人間・AI・システムの対応方針）
+  └─ trigger_rule_version（条件の結合方法・発火時方針）
+       ├─ trigger_rule_condition（1件以上の財務条件）
+       ├─ trigger_rule_assignment（適用scope）
+       └─ trigger_evaluation（Rule全体の判定結果）
+            └─ trigger_response（人間・AI・システムによる方針の確認・上書き）
 ```
 
 ### `trigger_rule`
@@ -112,7 +118,7 @@ Ruleの同一性と現在の有効状態だけを持つ。具体的な条件は�
 
 ### `trigger_rule_version`
 
-対象・計算定義・指標・比較方法・演算子・閾値・採用理由をversion単位で固定する。
+計算定義・条件の結合方法・発火時方針・採用理由をversion単位で固定する。
 自由なSQL式は受け付けず、APIが公開する制約付き語彙から選択する。
 
 | 列 | 型 | 意味 |
@@ -120,12 +126,9 @@ Ruleの同一性と現在の有効状態だけを持つ。具体的な条件は�
 | `rule_version_id` | BIGINT | Rule version ID |
 | `rule_id` | BIGINT | 安定したRule ID |
 | `version` | INTEGER | 1始まりの改訂番号 |
-| `target_id` | BIGINT | ユーザーが選んだ銘柄。保有とは限らない |
 | `definition_key` | TEXT | 計算定義群。現在はfinancial_metric_comparison |
-| `metric_key` | TEXT | revenue / operating_income / net_income |
-| `comparison_type` | TEXT | forecast_variance / yoy / absolute / sign_transition |
-| `operator` | TEXT | lte / gte / crosses_below / crosses_above |
-| `threshold_value` | NUMERIC | 数値比較の閾値。符号転換時はNULL |
+| `logic_operator` | TEXT | all / any。配下Conditionの三値論理による結合方法 |
+| `on_fire_decision` | TEXT | investigate / review_allocation / buy / sell / hold / no_action |
 | `rationale` | TEXT | 採用・改訂理由 |
 | `actor_type` | TEXT | human / agent / system / import |
 | `actor_id` | TEXT | 設定主体の識別子。任意 |
@@ -133,7 +136,23 @@ Ruleの同一性と現在の有効状態だけを持つ。具体的な条件は�
 
 `(rule_id, version)`は一意。条件を変更するときは既存versionを書き換えず、同じ
 `rule_id`に新しいversionを追加する。`trigger_rule.is_active`はRule全体の評価を停止するフラグであり、
-versionの一部ではない。
+versionの一部ではない。Rule versionには必ず1件以上のConditionを持たせる。この件数制約は
+複数テーブルにまたがるためService層で保証する。
+
+### `trigger_rule_condition`
+
+Rule version内の個々の財務条件を順序付きで保持する。同じ指標を期初予想比と前年比のような
+異なる比較軸で評価できる。条件を独立Ruleとして扱わないため、評価・作業キューはRule単位で1件になる。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `condition_id` | BIGINT | Condition ID |
+| `rule_version_id` | BIGINT | 所属するRule version |
+| `position` | INTEGER | UI・Evidence上の表示順。version内で一意 |
+| `metric_key` | TEXT | revenue / operating_income / net_income |
+| `comparison_type` | TEXT | forecast_variance / yoy / absolute / sign_transition |
+| `operator` | TEXT | lt / lte / gt / gte / crosses_below / crosses_above |
+| `threshold_value` | NUMERIC | 数値比較の閾値。符号転換時はNULL |
 
 `threshold_value`の単位は`comparison_type`によって異なる。
 
@@ -143,57 +162,95 @@ versionの一部ではない。
 - `sign_transition`: 閾値を保持せず、前回値と現在値の0越えを判
 
 `sign_transition`は`crosses_below`または`crosses_above`のみ、かつ`threshold_value IS NULL`とする。
-それ以外は`lte`または`gte`のみ、かつ閾値を必須とする。この整合性はAPIだけでなく
+それ以外は`lt`、`lte`、`gt`、`gte`のいずれか、かつ閾値を必須とする。この整合性はAPIだけでなく
 DBの`CHECK`制約でも保証する。
+
+複数条件は三値論理で集約する。ALLは1件でも`not_fired`なら`not_fired`、それがなく
+`unavailable`があれば`unavailable`。ANYは1件でも`fired`なら`fired`、それがなく
+`unavailable`があれば`unavailable`とする。
+
+### `trigger_rule_assignment`
+
+Rule versionをどの集合へ適用するかを固定する。現在はすべてメンバー展開型であり、Mandate、Theme、
+Watchlistを評価時点の構成Targetへ展開して、Targetごとに同じRuleを判定する。グループ全体を1件として
+判定する集約評価は、配分乖離等の対応Factができるまで実装しない。
+
+| 列 | 型 | 意味 |
+|---|---|---|
+| `assignment_id` | BIGINT | Assignment ID |
+| `rule_version_id` | BIGINT | Rule version。現時点では1 versionにつき1 Assignment |
+| `scope_type` | TEXT | investment_target / mandate / theme / watchlist |
+| `target_id` | BIGINT | 個別Target scope。条件付き必須 |
+| `mandate_id` | BIGINT | 投資枠scope。条件付き必須 |
+| `theme_id` | BIGINT | Themescope。条件付き必須 |
+| `watchlist_status` | TEXT | considering / monitoring / paused。NULLは登録銘柄すべて |
+| `created_at` | TIMESTAMPTZ | Assignment登録日時 |
+
+Target、Mandate、Themeは外部キーで参照し、`scope_type + scope_id`だけの無制約なポリモーフィック参照は
+使わない。Theme membershipとMandate assignmentは評価基準日の有効期間で解決する。Watchlistは独立した
+集合マスタを増やさず、`watchlist_entry`の現在状態から解決する。
 
 ### `trigger_evaluation`
 
 入力snapshotはObserved全件の複製ではなく、判定に使用したEvidenceだけを保存する。
-status=firedの評価がReview用Trigger Instanceに対応する。物理テーブルの二重化は行わない。
+status=firedの評価がTrigger Instanceに対応する。物理テーブルの二重化は行わない。
 同じ実績開示を再処理しても上書き・再通知しない。再生と実運用はmodeで明確に分離。
 
 | 列 | 型 | 意味 |
 |---|---|---|
 | `evaluation_id` | BIGINT | 評価ID |
 | `rule_version_id` | BIGINT | 判定に使用したRule version |
+| `target_id` | BIGINT | scope展開後、実際に判定した投資対象 |
 | `mode` | TEXT | replay / live |
 | `event_key` | TEXT | 計算定義が作る冪等イベントキー |
 | `as_of_date` | DATE | 評価基準日 |
 | `status` | TEXT | fired / not_fired / unavailable |
 | `reason` | TEXT | 比較可能または対象外・欠損理由 |
-| `observed_value` | NUMERIC | 演算子と比較するDerived値 |
-| `reference_value` | NUMERIC | 前年値・予想値などの参照値。任意 |
-| `evidence` | JSONB | 入力値・来歴・閾値・SQLハッシュ |
+| `observed_value` | NUMERIC | 1条件RuleのDerived値。複数条件ではNULL |
+| `reference_value` | NUMERIC | 1条件Ruleの参照値。複数条件ではNULL |
+| `evidence` | JSONB | 条件ごとの入力値・判定・来歴・閾値・SQLハッシュ |
 | `evidence_hash` | TEXT | 固定入力JSONのSHA-256 |
 | `definition_version` | TEXT | 評価処理のバージョン |
+| `orchestration_run_id` | TEXT | 定期評価を起動したAirflow Run ID。手動API評価はNULL |
+| `on_fire_decision` | TEXT | 評価時点の発火時方針を固定したスナップショット |
 | `evaluated_at` | TIMESTAMPTZ | 実際に処理した日時。過去へ戻さない |
 
 `(rule_version_id, mode, event_key)`は一意であり、同じRule versionと入力イベントを再処理しても
 判定履歴を重複生成しない。`as_of_date`は「いつの情報集合で判定したか」、
 `evaluated_at`は「実際にいつ処理したか」を表し、意味を分離する。
+`orchestration_run_id`は評価内容ではなく実行来歴であり、Evidence hashには含めない。
 
 `unavailable`は「条件不成立」ではない。必要値の欠損、比較基準の不足、判定時点で未公表など、
 判定不能だった状態を表す。`evidence`には判定に必要な入力と来歴のみを固定し、raw全体を複製しない。
 
 ### `trigger_response`
 
-発火した評価を受けて、どの対応方針を選んだかとその理由を追記する。
-これは対応の選択であり、売買約定、調査実施、投資成果等の実行済みAction / Outcomeではない。
+発火した評価に固定された方針を承認・上書き・保留した履歴と理由を追記する。
+これは方針に対する判断であり、売買約定、調査実施、投資成果等の実行済みAction / Outcomeではない。
 再生評価への記録は模擬対応として扱う。
 
 | 列 | 型 | 意味 |
 |---|---|---|
 | `response_id` | BIGINT | 記録ID |
 | `evaluation_id` | BIGINT | 発火した評価 |
-| `response_type` | TEXT | continue / investigate / review_allocation / hold |
+| `disposition` | TEXT | accepted / overridden / deferred |
+| `override_decision` | TEXT | 上書き後の方針。overridden時だけ必須 |
 | `rationale` | TEXT | その対応方針を選んだ理由 |
-| `next_review_on` | DATE | この発火案件の次回確認日。任意。Rule自体の定期監査日ではない |
+| `next_review_on` | DATE | この発火案件の次回確認日。**deferred時は必須**（無いと作業キューへ戻らない）。Rule自体の定期監査日ではない |
 | `actor_type` | TEXT | human / agent / system / import |
 | `actor_id` | TEXT | 記録主体の識別子。任意 |
 | `created_at` | TIMESTAMPTZ | 実際に記録した日時 |
 
 Trigger Rule自体の有用性評価、誤発火、見逃し、Outcomeとの関係を扱うRule監査は現時点で
 実装しない。運用履歴が蓄積し、評価基準が定まった後に`trigger_response`とは別の責務として設計する。
+Ruleの停止は`trigger_rule.is_active`で扱う。BUY / SELL / HOLDは`on_fire_decision`として事前に定義できるが、
+証券会社から取り込む実際の注文・約定Actionとは混ぜない。独立Decisionテーブルは設けず、Ruleの方針、
+Trigger Instanceのスナップショット、Responseの承認・上書きによって当時の選択を再現する。MVPではすべての
+発火時方針に人間の確認を必須とし、自動実行を導入するときに確認省略の設定を追加する。
+
+Ruleの停止と完全削除は別操作とする。停止は履歴を保持したまま今後の評価対象から外し、再開可能とする。
+完全削除は停止中Ruleに限り、配下のversion、condition、assignment、evaluation、responseも同一トランザクションで
+削除する。誤登録・不要な試行を除去する管理操作であり、削除前に影響件数と復元不能であることを画面に表示する。
 
 
 ## 4. マスタ
@@ -422,5 +479,7 @@ Relationship APIで追加すると、現在行がなければ新しいmembership
   `watchlist_entry.status = 'paused'`、Watchlistからの除外はその行の削除で表します。
 - テーマと銘柄の所属解除は物理削除せず、現在行の`effective_to`を設定します。
 - 時系列、取込履歴、財務開示は再現性確保のため履歴を保持します。
+- Trigger Ruleは通常は停止して履歴を保持します。不要と確定した停止中Ruleは、関連するRule履歴・判定・対応を
+  集約単位で完全削除できます。
 - その他の外部キーには自動削除を設定していません。参照中の親レコード削除は失敗させます。
 - rawデータ本体はDB外に保存し、`ingestion_run.raw_path` から追跡します。

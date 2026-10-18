@@ -2,7 +2,7 @@ BACKEND_IMAGE ?= invest-monitoring-api:local
 FRONTEND_IMAGE ?= invest-monitoring-frontend:local
 DATABASE_URL ?= postgresql://invest:invest@localhost:5432/invest
 
-.PHONY: db-up db-down db-migrate db-test-create db-provision-roles docker-build docker-run frontend-docker-build frontend-docker-run research-pbr
+.PHONY: db-up db-down db-migrate db-test-create db-provision-roles docker-build docker-run frontend-docker-build frontend-docker-run research-pbr airflow-up airflow-down airflow-logs
 
 RESEARCH_LAKE ?= data/parquet
 
@@ -11,6 +11,15 @@ db-up:
 
 db-down:
 	docker compose down
+
+airflow-up:
+	docker compose -f compose.yaml -f compose.airflow.yaml up -d --build airflow
+
+airflow-down:
+	docker compose -f compose.yaml -f compose.airflow.yaml down
+
+airflow-logs:
+	docker compose -f compose.yaml -f compose.airflow.yaml logs -f airflow
 
 db-migrate:
 	DATABASE_URL="$(DATABASE_URL)" venv/bin/alembic -c backend/alembic.ini upgrade head

@@ -5,31 +5,28 @@
 
 ## 現在の対応範囲
 
-- 対象: Investment Target、通期決算
+- 適用scope: Investment Target / Mandate / Theme / Watchlist
+- 評価単位: scopeの構成Investment Target、通期決算
 - 指標: 売上高、営業利益、純利益
-- 比較: 期初予想比、前年比、絶対値、黒字・赤字の符号転換
-- 演算子: 以上、以下、黒字から赤字、赤字から黒字
+- 比較: 期初予想比、前年比、絶対値、黒字・赤字の状態変化
+- 演算子: 未満、以下、超、以上、黒字から赤字、赤字から黒字
 - 結果: `fired` / `not_fired` / `unavailable`
 
-計算定義は`backend/analytics/derived/metric_comparison_input.sql`に置き、FastAPIは定義済み結果と
+計算定義の運用正本はBigQuery/dbtの`invest_marts.fct_metric_comparison`です。FastAPIは定義済みFactと
 Ruleを照合するだけです。PostgreSQLにはRuleの安定IDと追記型version、判定Evidence、発火後の対応を保存します。
+`BIGQUERY_PROJECT`が未設定のローカル開発・fixtureでは、照合済みの
+`backend/analytics/derived/metric_comparison_input.sql`をDuckDBで読みます。
 
-## 使い方
+## 操作の流れ
 
-1. migration 0013まで適用し、財務Parquetを含む`PARQUET_LAKE`でAPIを起動する。
-2. `/triggers`で投資対象・指標・比較・演算子・閾値・採用理由を保存する。
-3. 最初は過去再生で動作を確認する。実運用はRule登録後に公表されたデータだけを対象にする。
-4. 発火した評価へ対応方針、理由、必要ならその案件の次回確認日を記録する。
-5. 条件を変更するときは同じRuleへ新versionを追加する。過去の評価は書き換えない。
+Rule（適用scope・指標・比較・演算子・閾値・発火時方針・採用理由）を`/triggers`で登録し、
+評価して、発火案件へ対応方針と理由を記録します。条件を変えるときは同じRuleへ新versionを
+追加し、過去の評価は書き換えません。一時的に使わないRuleは停止でき、不要と確定したものは
+停止後に関連履歴ごと完全削除できます。
 
-DBへ書かずに確認する例:
-
-```sh
-PYTHONPATH=backend venv/bin/python -m scripts.replay_trigger \
-  --lake data/parquet --target 2796.T \
-  --metric operating_income --comparison forecast_variance \
-  --operator lte --threshold -10 --as-of 2026-10-09
-```
+画面からの評価は実運用（当日）だけです。閾値の校正に使う過去再生は、DBへ書かない
+`backend/scripts/replay_trigger.py`で確かめます。起動に必要な設定は
+[開発手順](development.md)を参照してください。
 
 ## 判定契約
 
@@ -40,7 +37,21 @@ PYTHONPATH=backend venv/bin/python -m scripts.replay_trigger \
 - 開示翌暦日から利用可能とし、欠損・比較不能を`not_fired`へ落とさない。
 - 同じRule version・mode・イベントは一度だけ保存する。
 - 過去再生は当時の実判断ではない。実運用と混ぜない。
-- Trigger発火は売買指示ではなく、人間への見直し要求である。
+- Review Triggerは人間への見直し要求である。事前にAction Policyまで採用したDecision Triggerは、発火時に
+  BUY / SELL / HOLD等の方針を成立させられるが、注文・約定Actionとは分離する。
+- Mandate / Theme / Watchlist scopeは評価時に構成Targetへ展開し、実際に判定したTargetをEvidenceへ固定する。
+- Rule versionは`on_fire_decision`を持つ。評価時に同じ値をTrigger Instanceへ固定し、後からRuleを
+  改訂しても当時の方針を再現できるようにする。MVPではすべて人間の確認を必須とする。
+- 発火後のResponseは方針の`accepted` / `overridden` / `deferred`を記録する。上書き時だけ代替方針を必須とする。
+  `deferred`は次回確認日を必須とする。無いと要対応の条件（`next_review_on <= CURRENT_DATE`）に
+  永久に合致せず、作業キューから消える。
+- **判定一覧は履歴ではなく作業キューである。** 既定は実運用（`live`）の要対応案件だけを、開示日の
+  降順で返す。要対応は「一度も確認していない」か「再確認日が到来した保留」を指す。過去再生は
+  Ruleの校正用であり、人間が対応すべき案件ではないため既定では返さない。
+- 停止は`is_active`で表し、一覧から外すのは表示の都合である。停止は終了ではなく中断として扱い、
+  再開してもversionは進まない。
+- 完全削除は停止中Ruleだけに許可し、Ruleだけを孤立して消さず、version、condition、assignment、
+  evaluation、responseを同一トランザクションで削除する。画面には削除対象件数と復元不能であることを表示する。
 
 ## 詳細分析との境界
 
@@ -55,12 +66,15 @@ PYTHONPATH=backend venv/bin/python -m scripts.replay_trigger \
 
 ## 後続
 
-同じ入力契約のBigQuery＋dbt版は`analytics/dbt/`にあり、`fct_metric_comparison`として
-実装済みです。`analytics/dbt/reconcile_duckdb.py`でDuckDB定義との一致を確認します。
-FastAPIが読むのは現時点でもDuckDB側で、閲覧ごとのスキャン課金を避けています。
+BigQuery＋dbt版は`analytics/dbt/`の`fct_metric_comparison`として実装済みです。
+`analytics/dbt/reconcile_duckdb.py`でDuckDB定義との一致を確認します。FastAPIはRuleを手動評価する
+時点で対象銘柄・指標・比較種別・基準日をparameterized queryで絞り、1 queryあたりの
+`maximum_bytes_billed`を適用します。Web画面の閲覧自体はPostgreSQLだけを読み、BigQueryへ接続しません。
 
-Airflowは未導入です。取得、品質検証、変換、Trigger評価の依存と再実行をGitHub Actionsで
-表現しきれなくなった時点で検討します。Rule・Responseは引き続きPostgreSQLの業務状態です。
+Airflowのローカル縦スライスを導入済みです。取得、raw公開、BigQueryロード、dbt品質検証、
+Trigger評価を`financial_disclosure_trigger_pipeline`で接続しています。本番schedulerは未デプロイで、
+起動・再実行方法は`orchestration/airflow/README.md`を参照してください。
+Rule・Responseは引き続きPostgreSQLの業務状態です。
 
 Trigger Rule自体の有用性や誤発火を評価するRule監査は、Outcomeと運用履歴が蓄積してから
 別の責務として設計します。`trigger_response`に監査結果は保存しません。

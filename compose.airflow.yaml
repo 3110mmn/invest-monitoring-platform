@@ -1,0 +1,32 @@
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: orchestration/airflow/Dockerfile
+    command: standalone
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/orchestration/airflow/dags
+      DATABASE_URL: ${DATABASE_URL:-postgresql://invest:invest@postgres:5432/invest}
+      DATABASE_READ_ONLY: "false"
+      RAW_DATA_URI: ${RAW_DATA_URI:-gs://invest-dwh-db-storage/raw}
+      BIGQUERY_PROJECT: ${BIGQUERY_PROJECT:-invest-dwh}
+      BIGQUERY_LOCATION: ${BIGQUERY_LOCATION:-australia-southeast1}
+      BIGQUERY_RAW_DATASET: ${BIGQUERY_RAW_DATASET:-invest_raw}
+      BIGQUERY_STAGING_DATASET: ${BIGQUERY_STAGING_DATASET:-invest_staging}
+      BIGQUERY_MARTS_DATASET: ${BIGQUERY_MARTS_DATASET:-invest_marts}
+      JQUANTS_API_KEY: ${JQUANTS_API_KEY:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp/application_default_credentials.json
+    ports:
+      - "8081:8080"
+    volumes:
+      - .:/opt/airflow/project
+      - airflow-data:/opt/airflow
+      - ${GCP_ADC_PATH:-/tmp/missing-google-adc.json}:/opt/airflow/gcp/application_default_credentials.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  airflow-data:

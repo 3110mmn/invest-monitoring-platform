@@ -17,6 +17,14 @@ class CompletedJob:
         return None
 
 
+class RowJob:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def result(self) -> list[dict[str, Any]]:
+        return self.rows
+
+
 class FakeBigQueryClient:
     def __init__(self) -> None:
         self.queries: list[str] = []
@@ -154,6 +162,18 @@ def test_loader_rejects_missing_query_cost_ceiling() -> None:
             subject.BigQuerySettings(project="invest-dwh"),
             maximum_bytes_billed=0,
         )
+
+
+def test_latest_jquants_watermark_uses_loaded_ingestion_run() -> None:
+    client = FakeBigQueryClient()
+    client.query = lambda query, **kwargs: RowJob([{"ingestion_run_id": 42}])  # type: ignore[method-assign]
+    loader = subject.BigQueryFinancialHistoryLoader(
+        client,
+        subject.BigQuerySettings(project="invest-dwh"),
+        maximum_bytes_billed=10 * 1024**3,
+    )
+
+    assert loader.latest_jquants_ingestion_run_id() == 42
 
 
 def _jquants_run(raw: Path) -> subject.JQuantsRawRun:

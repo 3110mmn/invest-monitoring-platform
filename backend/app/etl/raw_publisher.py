@@ -11,6 +11,7 @@ from pathlib import Path
 from app.database import Connection
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+Uploader = Callable[[Path, str], None]
 
 
 def _sha256(path: Path) -> str:
@@ -73,6 +74,31 @@ def upload_immutable_object(
     )
 
 
+def upload_immutable_object_with_gcs(source: Path, destination: str) -> None:
+    """Upload with the GCS SDK for containers that do not ship the gcloud CLI."""
+    from google.api_core.exceptions import PreconditionFailed
+    from google.cloud import storage  # type: ignore[attr-defined]
+
+    if not destination.startswith("gs://"):
+        raise ValueError("destination must start with gs://")
+    bucket_name, object_name = destination[5:].split("/", 1)
+    digest = _sha256(source)
+    blob = storage.Client().bucket(bucket_name).blob(object_name)
+    blob.metadata = {"sha256": digest}
+    try:
+        blob.upload_from_filename(str(source), if_generation_match=0)
+        return
+    except PreconditionFailed as exc:
+        # A retry is successful only when the immutable object is byte-for-byte
+        # the one this run intended to publish.
+        blob.reload()
+        if (blob.metadata or {}).get("sha256") == digest:
+            return
+        raise RuntimeError(
+            f"Immutable raw object already exists with another hash: {destination}"
+        ) from exc
+
+
 def publish_pending_raw(
     connection: Connection,
     *,
@@ -80,6 +106,7 @@ def publish_pending_raw(
     project_root: Path,
     destination_base: str,
     runner: CommandRunner = subprocess.run,
+    uploader: Uploader | None = None,
     max_workers: int = 8,
 ) -> dict[str, int]:
     """Upload available local raw files, then replace DB paths with GCS URIs."""
@@ -119,7 +146,10 @@ def publish_pending_raw(
     # `raw_path` の書き換えは「公開できたことの記録」なので、成功した分だけ順に反映する。
     def upload(item: tuple[int, str, Path, str]) -> tuple[int, str, str]:
         run_id, previous, source, destination = item
-        upload_immutable_object(source, destination, runner=runner)
+        if uploader is None:
+            upload_immutable_object(source, destination, runner=runner)
+        else:
+            uploader(source, destination)
         return run_id, previous, destination
 
     results: list[tuple[int, str, str]] = []

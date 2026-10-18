@@ -176,6 +176,10 @@ python -m research.breach_event_study --benchmark 1348.T
 `backend/analytics/derived/point_in_time_forecast.sql` と `forecast_accuracy.sql`で、
 Research専用スクリプトではなくDerivedとして置いています。
 
+**ここでの測定はDuckDB版の定義によるものです。** 継続運用するTrigger判定の正本は
+BigQuery/dbtの`invest_marts.fct_metric_comparison`へ移っており、DuckDB版は探索・
+fixture・結果照合のために残しています（[Trigger Operations Pilot](../docs/trigger-operations-pilot.md)）。
+
 ### なぜ「予想をどれにするか」が分析の本体か
 
 会社は期中に何度も通期予想を出し直します。実測では(企業×年度×期)の1,047グループで

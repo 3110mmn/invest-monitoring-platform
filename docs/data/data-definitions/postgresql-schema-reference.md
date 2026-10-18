@@ -24,9 +24,11 @@
 | `capital_budget_version` | 8 | `capital_budget_version_id` |
 | `watchlist_entry` | 4 | `target_id` |
 | `trigger_rule` | 4 | `rule_id` |
-| `trigger_rule_version` | 13 | `rule_version_id` |
-| `trigger_evaluation` | 13 | `evaluation_id` |
-| `trigger_response` | 8 | `response_id` |
+| `trigger_rule_version` | 10 | `rule_version_id` |
+| `trigger_evaluation` | 16 | `evaluation_id` |
+| `trigger_response` | 9 | `response_id` |
+| `trigger_rule_assignment` | 8 | `assignment_id` |
+| `trigger_rule_condition` | 7 | `condition_id` |
 
 ## テーブル間の関係
 
@@ -44,9 +46,14 @@ erDiagram
     investment_target ||--o{ mandate_target_assignment : target_id
     investment_target ||--o| watchlist_entry : target_id
     trigger_rule ||--o{ trigger_rule_version : rule_id
-    investment_target ||--o{ trigger_rule_version : target_id
     trigger_rule_version ||--o{ trigger_evaluation : rule_version_id
+    investment_target ||--o{ trigger_evaluation : target_id
     trigger_evaluation ||--o{ trigger_response : evaluation_id
+    trigger_rule_version ||--o{ trigger_rule_assignment : rule_version_id
+    investment_target ||--o{ trigger_rule_assignment : target_id
+    capital_allocation_mandate ||--o{ trigger_rule_assignment : mandate_id
+    theme ||--o{ trigger_rule_assignment : theme_id
+    trigger_rule_version ||--o{ trigger_rule_condition : rule_version_id
 ```
 
 ## テーブル定義
@@ -306,22 +313,17 @@ erDiagram
 | `rule_version_id` | BIGINT | NO | `AS` | - |
 | `rule_id` | BIGINT | NO | - | - |
 | `version` | INTEGER | NO | - | - |
-| `target_id` | BIGINT | NO | - | - |
 | `definition_key` | TEXT | NO | - | - |
-| `metric_key` | TEXT | NO | - | `revenue`, `operating_income`, `net_income` |
-| `comparison_type` | TEXT | NO | - | `forecast_variance`, `yoy`, `absolute`, `sign_transition` |
-| `operator` | TEXT | NO | - | `lte`, `gte`, `crosses_below`, `crosses_above` |
-| `threshold_value` | NUMERIC | YES | - | - |
 | `rationale` | TEXT | NO | - | - |
 | `actor_type` | TEXT | NO | `'human'` | `human`, `agent`, `system`, `import` |
 | `actor_id` | TEXT | YES | - | - |
 | `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+| `on_fire_decision` | TEXT | NO | `'investigate'` | `investigate`, `review_allocation`, `buy`, `sell`, `hold`, `no_action` |
+| `logic_operator` | TEXT | NO | `'all'` | `all`, `any` |
 
 - 主キー: `rule_version_id`
 - 一意キー: `rule_id`, `version`
 - 外部キー: `rule_id` → `trigger_rule`(`rule_id`)
-- 外部キー: `target_id` → `investment_target`(`target_id`)
-- テーブルCHECK: `(comparison_type = 'sign_transition' AND operator IN ('crosses_below', 'crosses_above') AND threshold_value IS NULL) OR (comparison_type <> 'sign_transition' AND operator IN ('lte', 'gte') AND threshold_value IS NOT NULL)`
 
 ### `trigger_evaluation`
 
@@ -340,10 +342,17 @@ erDiagram
 | `evidence_hash` | TEXT | NO | - | - |
 | `definition_version` | TEXT | NO | - | - |
 | `evaluated_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+| `target_id` | BIGINT | NO | - | - |
+| `on_fire_decision` | TEXT | NO | `'investigate'` | `investigate`, `review_allocation`, `buy`, `sell`, `hold`, `no_action` |
+| `orchestration_run_id` | TEXT | YES | - | - |
 
 - 主キー: `evaluation_id`
 - 一意キー: `rule_version_id`, `mode`, `event_key`
 - 外部キー: `rule_version_id` → `trigger_rule_version`(`rule_version_id`)
+- 外部キー: `target_id` → `investment_target`(`target_id`)
+- テーブルCHECK: `on_fire_decision IN ('investigate', 'review_allocation', 'buy', 'sell', 'hold', 'no_action')`
+- インデックス `idx_trigger_evaluation_target`: `target_id`
+- インデックス `idx_trigger_evaluation_orchestration_run`: `orchestration_run_id` WHERE `orchestration_run_id IS NOT NULL`
 
 ### `trigger_response`
 
@@ -351,12 +360,54 @@ erDiagram
 |---|---|---|---|---|
 | `response_id` | BIGINT | NO | `AS` | - |
 | `evaluation_id` | BIGINT | NO | - | - |
-| `response_type` | TEXT | NO | - | `continue`, `investigate`, `review_allocation`, `hold` |
 | `rationale` | TEXT | NO | - | - |
 | `next_review_on` | DATE | YES | - | - |
 | `actor_type` | TEXT | NO | `'human'` | `human`, `agent`, `system`, `import` |
 | `actor_id` | TEXT | YES | - | - |
 | `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+| `disposition` | TEXT | NO | - | `accepted`, `overridden`, `deferred` |
+| `override_decision` | TEXT | YES | - | `investigate`, `review_allocation`, `buy`, `sell`, `hold`, `no_action` |
 
 - 主キー: `response_id`
 - 外部キー: `evaluation_id` → `trigger_evaluation`(`evaluation_id`)
+- テーブルCHECK: `disposition IN ('accepted', 'overridden', 'deferred')`
+- テーブルCHECK: `override_decision IS NULL OR override_decision IN ('investigate', 'review_allocation', 'buy', 'sell', 'hold', 'no_action')`
+- テーブルCHECK: `(disposition = 'overridden' AND override_decision IS NOT NULL) OR (disposition <> 'overridden' AND override_decision IS NULL)`
+- テーブルCHECK: `disposition <> 'deferred' OR next_review_on IS NOT NULL`
+
+### `trigger_rule_assignment`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `assignment_id` | BIGINT | NO | `AS` | - |
+| `rule_version_id` | BIGINT | NO | - | - |
+| `scope_type` | TEXT | NO | - | `investment_target`, `mandate`, `theme`, `watchlist` |
+| `target_id` | BIGINT | YES | - | - |
+| `mandate_id` | BIGINT | YES | - | - |
+| `theme_id` | BIGINT | YES | - | - |
+| `watchlist_status` | TEXT | YES | - | `considering`, `monitoring`, `paused` |
+| `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `assignment_id`
+- 外部キー: `rule_version_id` → `trigger_rule_version`(`rule_version_id`)（ON DELETE CASCADE）
+- 外部キー: `target_id` → `investment_target`(`target_id`)
+- 外部キー: `mandate_id` → `capital_allocation_mandate`(`mandate_id`)
+- 外部キー: `theme_id` → `theme`(`theme_id`)
+- テーブルCHECK: `(scope_type = 'investment_target' AND target_id IS NOT NULL AND mandate_id IS NULL AND theme_id IS NULL AND watchlist_status IS NULL) OR (scope_type = 'mandate' AND target_id IS NULL AND mandate_id IS NOT NULL AND theme_id IS NULL AND watchlist_status IS NULL) OR (scope_type = 'theme' AND target_id IS NULL AND mandate_id IS NULL AND theme_id IS NOT NULL AND watchlist_status IS NULL) OR (scope_type = 'watchlist' AND target_id IS NULL AND mandate_id IS NULL AND theme_id IS NULL)`
+
+### `trigger_rule_condition`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `condition_id` | BIGINT | NO | `AS` | - |
+| `rule_version_id` | BIGINT | NO | - | - |
+| `position` | INTEGER | NO | - | - |
+| `metric_key` | TEXT | NO | - | `revenue`, `operating_income`, `net_income` |
+| `comparison_type` | TEXT | NO | - | `forecast_variance`, `yoy`, `absolute`, `sign_transition` |
+| `operator` | TEXT | NO | - | `lt`, `lte`, `gt`, `gte`, `crosses_below`, `crosses_above` |
+| `threshold_value` | NUMERIC | YES | - | - |
+
+- 主キー: `condition_id`
+- 一意キー: `rule_version_id`, `position`
+- 外部キー: `rule_version_id` → `trigger_rule_version`(`rule_version_id`)（ON DELETE CASCADE）
+- テーブルCHECK: `(comparison_type = 'sign_transition' AND operator IN ('crosses_below', 'crosses_above') AND threshold_value IS NULL) OR (comparison_type <> 'sign_transition' AND operator IN ('lt', 'lte', 'gt', 'gte') AND threshold_value IS NOT NULL)`

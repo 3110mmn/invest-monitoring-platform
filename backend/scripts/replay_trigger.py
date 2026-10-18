@@ -24,7 +24,9 @@ def main() -> None:
         choices=("forecast_variance", "yoy", "absolute", "sign_transition"),
         required=True,
     )
-    parser.add_argument("--operator", choices=("lte", "gte", "crosses_below", "crosses_above"), required=True)
+    parser.add_argument(
+        "--operator", choices=("lt", "lte", "gt", "gte", "crosses_below", "crosses_above"), required=True
+    )
     parser.add_argument("--threshold", type=Decimal)
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today())
     args = parser.parse_args()
@@ -32,7 +34,7 @@ def main() -> None:
         if not args.operator.startswith("crosses_") or args.threshold is not None:
             parser.error("sign_transition requires a crosses operator and no threshold")
     elif args.operator.startswith("crosses_") or args.threshold is None:
-        parser.error("numeric comparisons require lte/gte and --threshold")
+        parser.error("numeric comparisons require lt/lte/gt/gte and --threshold")
     glob = lake_glob(args.lake, FINANCIAL_SUBPATH)
     with open_connection(glob) as connection:
         connection.execute(

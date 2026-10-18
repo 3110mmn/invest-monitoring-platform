@@ -141,6 +141,30 @@ def test_uploads_run_in_parallel(db: Connection, tmp_path: Path) -> None:
     assert peak > 1, "逐次実行になっている"
 
 
+def test_custom_uploader_preserves_publish_contract(db: Connection, tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_file = raw_dir / "run.json.gz"
+    raw_file.parent.mkdir(parents=True)
+    raw_file.write_bytes(b"raw")
+    run_id = _ingestion_run(db, "raw/run.json.gz")
+    calls: list[tuple[Path, str]] = []
+
+    result = publish_pending_raw(
+        db,
+        raw_dir=raw_dir,
+        project_root=tmp_path,
+        destination_base="gs://bucket/raw",
+        uploader=lambda source, destination: calls.append((source, destination)),
+    )
+
+    row = db.execute(
+        "SELECT raw_path FROM ingestion_run WHERE ingestion_run_id = ?", (run_id,)
+    ).fetchone()
+    assert result == {"uploaded": 1, "missing": 0}
+    assert calls == [(raw_file, "gs://bucket/raw/run.json.gz")]
+    assert row["raw_path"] == "gs://bucket/raw/run.json.gz"
+
+
 def test_a_failed_upload_does_not_mark_others_published(
     db: Connection, tmp_path: Path
 ) -> None:

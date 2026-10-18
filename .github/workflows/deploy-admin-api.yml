@@ -80,7 +80,7 @@ jobs:
             --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
             --port 8080 \
             --no-allow-unauthenticated \
-            --set-env-vars "DATABASE_READ_ONLY=false,MANAGEMENT_API_ENABLED=true,PARQUET_LAKE=${REAL_PARQUET_LAKE}" \
+            --set-env-vars "DATABASE_READ_ONLY=false,MANAGEMENT_API_ENABLED=true,PARQUET_LAKE=${REAL_PARQUET_LAKE},BIGQUERY_PROJECT=${GCP_PROJECT_ID},BIGQUERY_LOCATION=${{ inputs.region }},BIGQUERY_MARTS_DATASET=invest_marts" \
             --set-secrets "DATABASE_URL=${DATABASE_SECRET}:latest,MANAGEMENT_API_KEY=${MANAGEMENT_KEY_SECRET}:latest" \
             --min-instances 0 \
             --max-instances 1 \

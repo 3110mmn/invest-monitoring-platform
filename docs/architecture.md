@@ -30,6 +30,8 @@ flowchart LR
     BQStg[("BigQuery invest_staging")]
     DBT["dbt<br/>staging / intermediate / marts"]
     Mart[("BigQuery invest_marts<br/>fct_metric_comparison")]
+    Airflow["Airflow<br/>financial disclosure Trigger DAG"]
+    TriggerEval["Trigger evaluation worker"]
     API["FastAPI"]
     Web["Next.js"]
 
@@ -39,11 +41,17 @@ flowchart LR
     Run -->|"監視対象・Rule"| API
     API --> Web
     Raw --> BQRaw --> BQStg --> DBT --> Mart
+    Mart -->|"Trigger Fact"| TriggerEval -->|"判定・DAG Run ID"| Run
+    Airflow -.-> Fetch
+    Airflow -.-> BQRaw
+    Airflow -.-> DBT
+    Airflow -.-> TriggerEval
+    Mart -->|"手動評価"| API
 ```
 
-**rawからの経路は2本あります。** Parquet / DuckDBは日次運用とAPIの読み出し、
-BigQuery / dbtは複数年度・複数銘柄を横断する分析履歴です。どちらもGCS rawを原本とし、
-削除して作り直せます。
+**rawからの経路は2本あり、互いを参照しません。** BigQueryはParquetを読まず、DuckDBは
+BigQueryを読みません。Parquet / DuckDBは日次運用とAPIの読み出し、BigQuery / dbtは
+複数年度・複数銘柄を横断する分析履歴です。どちらもGCS rawを原本とし、削除して作り直せます。
 
 公開デモには外部取得データを流しません。**同じコードを通し**、別バケットのsynthetic
 Parquetと別PostgreSQLだけを参照します。分離はコードの分岐ではなくバケットの権限で
@@ -52,36 +60,17 @@ Parquetと別PostgreSQLだけを参照します。分離はコードの分岐で
 | 層 | 責務 | 主な実装 |
 |---|---|---|
 | 外部データ | 原データの提供 | J-Quants、yfinance |
-| 取得・ETL | 取得、raw保存、来歴記録 | Python、GitHub Actions |
+| 取得・ETL | 取得、raw保存、来歴記録 | Python、GitHub Actions、Airflow |
 | 分析層 | 正規化、Parquet構築、Derivedの計算 | pyarrow、DuckDB |
-| Control Plane | 監視対象・テーマ・構成・取込メタデータ | PostgreSQL |
+| Control Plane | 監視対象・テーマ・構成・Trigger Rule / scope・取込メタデータ | PostgreSQL |
 | アプリケーション | データアクセス、HTTP提供、画面表示 | FastAPI、Next.js |
 
 ## Exploration PlaneとOperational Plane
 
-汎用Trigger基盤の最初の定義は、財務Parquetから通期の売上高・営業利益・純利益を取得し、
-期初予想比・前年比・絶対値・符号転換をDerived SQLで計算する。PostgreSQLには汎用Ruleとversion、
-判定時のEvidence、発火後の対応方針・理由・次回確認日を保存する。Webの `/triggers` から手動実行でき、再生と実運用を分離する。
-Rule自体の有用性を評価する監査・学習機能は現時点で実装しない。
-
-### Webアプリで実装する範囲
-
-**Webアプリは「何が発火し、誰がどう対応したか」を扱い、「なぜ発火したのか」は扱いません。**
-
-| 実装する | 実装しない |
-|---|---|
-| Trigger Ruleの設定とversion | 利益率・CF分解の画面 |
-| `fired` / `not_fired` / `unavailable` の一覧 | 業種比較の画面 |
-| 予想値・実績値・乖離率・公表日時の表示 | 原因仮説の検証UI |
-| 発火案件への対応方針と理由の入力 | 一度限りの追加調査 |
-| Evidenceへのリンクと対応履歴 | 分析手法ごとの専用API |
-
-詳細分析の画面を先に作ると、**分析手法が増えるたびにAPI・画面・スキーマが増殖します。**
-まずSQLやNotebookで手法を試し、複数の発火案件で繰り返し使われたものだけをOperational側へ
-昇格させます。
-
-分析結果をWebと完全に分断するわけではありません。Webには分析そのものではなく、**結果への
-参照と人間の結論**を残します（分析種別、要約、成果物URI、実施時刻、実施者、対応方針）。
+Operational Planeの入力は、dbtが計算した`invest_marts.fct_metric_comparison`です。
+DuckDB版の同一計算はローカル開発・fixture・結果照合のために残し、本番判定の正本にはしません。
+Rule・判定・対応履歴はPostgreSQLが持ちます。判定契約と実装範囲は
+[Trigger Operations Pilot](trigger-operations-pilot.md)が正本です。
 
 ### 2つのPlane
 
@@ -129,42 +118,19 @@ Assessment Definition、Trigger、Dashboardへ昇格させます。Derivedが存
 
 dbtを使う理由は、**point-in-timeの不変条件をSQLの外側でテストできる**ことです。
 `analytics/dbt/models/sources.yml`が入口で`available_at`のnot_nullを検査し、
-`tests/reference_precedes_current.sql`が「比較対象は現在より前の時点であること」を検証します。
+`analytics/dbt/tests/reference_precedes_current.sql`が「比較対象は現在より前の時点であること」を検証します。
 後知恵の混入は値を見ても気づけないため、テストとして固定します。
-
-| ファイル | 役割 |
-|---|---|
-| `analytics/dbt/dbt_project.yml` | モデルをどう作るか。`marts`だけ`table`、他は`view` |
-| `analytics/dbt/profiles.yml` | どこへ繋ぐか。`maximum_bytes_billed`もここ |
-| `analytics/dbt/models/sources.yml` | dbtの外から来るものの宣言と入口の検査 |
-| `analytics/dbt/models/marts/schema.yml` | dbtが作ったものの説明と出口の検査 |
 
 移行期間は`analytics/dbt/reconcile_duckdb.py`が、dbtのFactと既存のDuckDB定義を
 ローカルの重なり範囲で突き合わせます。SQLを書き直すと意味が静かに変わることがあり、
 テストでは捕まえにくいためです。
 
-**Airflowはまだ導入していません。** 取得・品質検証・変換・Trigger評価の依存と再実行を
-GitHub Actionsで表現しきれなくなった時点で検討します。
-
-### dbt docsの公開とCIの権限
-
-dbt docsはモデルの依存グラフ、列定義、テスト、コンパイル済みSQLを含む静的サイトで、
-観測値そのものを含みません。生成は非公開側のGitHub Actions、配信は公開スナップショットの
-GitHub Pagesが担います（Pagesは無料プランではpublicリポジトリでのみ利用可、生成には
-BigQueryへの認証が要るという非対称のため）。
-
-**`dbt docs generate --empty-catalog`を使い、CIへ`bigquery.dataViewer`を与えません。**
-dbtのBigQueryアダプタはcatalog生成時に`__TABLES__`を**クエリで**読むため、
-`metadataViewer`では足りず`dataViewer`が要ります。これを与えるとCIのサービスアカウントが
-J-Quants実データの行を読めるようになります。workflowは読みませんが、能力は残ります。
-
-catalogを空にして失うのは、warehouse上の列の型と`schema.yml`へ書いていない列名だけです。
-DAG、description、テスト、compiled SQLはmanifest側に残ります。列の説明が要るなら
-`schema.yml`へ書きます。そちらの方がドキュメントとして確かです。
-
-CIのサービスアカウントに付与しているのは`bigquery.jobUser`と`bigquery.metadataViewer`
-だけです。`scripts/check_dbt_docs_safe.py`が、公開前に行数統計・銘柄コードのリテラル・
-認証情報の混入を検査します。
+財務開示からTrigger評価までの運用ワークフローにはAirflowの実装を追加しています。
+`financial_disclosure_trigger_pipeline`がraw取得・GCS公開・BigQueryロード・dbt品質ゲート・
+Trigger評価を順序制御し、新規rawがない日は分析処理をskipします。GitHub Actionsは引き続き
+CI/CDと既存の日次lake更新を担当し、Airflowは判断系データワークフローを担当します。
+ローカル構成と再実行契約は`orchestration/airflow/README.md`を参照してください。
+現時点の実行環境はローカルstandaloneであり、本番schedulerの常時稼働は未デプロイです。
 
 ## 実行環境
 
@@ -226,16 +192,9 @@ flowchart TB
 日次ETLのサービスアカウントだけがプロジェクトレベルの `storage.objectAdmin` を持ち、
 rawとlakeを書きます。
 
-| サービス | 役割 |
-|---|---|
-| Cloud Run | Next.jsとFastAPIのコンテナを実行する |
-| Artifact Registry | デプロイ対象のDockerイメージを保管する |
-| Secret Manager | DB接続URLと管理キーを実行時に渡す |
-| GCS `invest-dwh-db-storage` | rawレスポンス（原本）、分析層のParquet、`pg_dump`。管理APIだけが読む |
-| GCS `invest-demo-lake` | syntheticなParquet。公開APIだけが読む |
-| Neon PostgreSQL（実データ） | 監視対象・テーマ・構成・取込メタデータ。価格と財務は持たない |
-| Neon PostgreSQL（デモ） | 公開APIが読むsynthetic data。実データと認証情報を共有しない |
-| GitHub Actions | CI、build、deploy、日次ETL、バックアップを自動化する |
+管理APIのRuntime SAは、Trigger評価時に`invest_marts`を読むため、プロジェクトレベルの
+`roles/bigquery.jobUser`と`invest_marts` dataset限定の`roles/bigquery.dataViewer`を持ちます。
+公開APIのRuntime SAにはBigQuery権限を付与せず、実データのTrigger評価経路へ到達させません。
 
 ## 公開・管理・開発環境の境界
 
@@ -264,34 +223,24 @@ rawとlakeを書きます。
 拒否します。作成した投資枠は1時間後にAPIの一覧・詳細から除外され、GitHub Actionsのcleanup workflowが
 期限切れ行を物理削除します。seed済みデモ投資枠は期限を持たず、公開APIから編集・削除できません。
 
-API側では入力長、割合、1分あたりの書き込み数、同時保持Mandate数、Mandateごとの割当数を制限します。
-レート制限はCloud Runプロセス内のbest-effort制御であり、耐久的な上限はDBクォータと期限削除で担保します。
-共有デモに入力した内容は他の閲覧者にも表示されるため、画面にその旨を表示します。個人別の非公開領域では
-ありません。
+入力長や書き込み頻度はAPI側で制限しますが、これはCloud Runプロセス内のbest-effortです。
+耐久的な上限はDBクォータと期限削除で担保します。共有デモなので、入力は他の閲覧者にも表示されます。
 
-書き込み用ロールは`capital_budget_version`を含む他テーブルの変更権限を持たず、`public`スキーマへの
-`CREATE`もありません。cleanup用ロールもMandate関連以外は削除できません。**HTTP層で経路を絞るだけでなく、
-DB権限でも絞ります。** 設定を取り違えても、書けるテーブルは増えません。
+**HTTP層で経路を絞るだけでなく、DB権限でも絞ります。** 書き込み用ロールはMandate関連以外を
+変更できず、`public`スキーマへの`CREATE`もありません。設定を取り違えても書けるテーブルは増えません。
 
 ロールの作成手順とSecret名は非公開の運用メモで管理し、公開リポジトリには含めません。
 
 管理APIはCloud Run IAMと`X-Admin-Key`で保護し、管理用Secretをブラウザへ埋め込みません。スキーマ変更は
 日次ETLやアプリ起動時に行わず、リリース時にAlembicを明示実行します。
 
-**実データを編集する経路は2つあります。** 現在使っているのは手元のNext.jsとFastAPIを経由する経路で、
-ブラウザから実データDBへ`app_writer`で書き込みます。Cloud Runの管理APIはIAM認証を必要とするため
-ブラウザから直接は呼べず、リモートから管理するためのUIはまだありません。どちらの経路でもロールは
-`app_writer`に揃えてあり、スキーマは変更できません。
+**実データへ繋ぐときのロールは`app_writer`に限定します。** 手元のFastAPIからでも
+`CREATE TABLE`・`DROP TABLE`・`TRUNCATE`は`permission denied`で止まります。接続先は画面上部の
+バナーが常時表示します。開発DBと実データDBで見た目が変わらないため、表示が無いと実データを
+開発だと思って編集する事故が起きます。
 
-**ローカルの接続先は`backend/.env`で選びます。** 開発DBと実データDBのどちらにも繋げますが、
-実データへ繋ぐときのロールは`app_writer`に限定し、ローカルからスキーマを壊せないようにしています。
-CRUDはできても`CREATE TABLE`・`DROP TABLE`・`TRUNCATE`はすべて`permission denied`で止まります。
-
-接続先は画面上部のバナーが常時表示します。開発DBと実データDBで画面の見た目は変わらないため、
-表示が無いと実データを開発だと思って編集する事故が起きます。
-
-開発DBと本番DBのデータは自動同期しません。同期するのはAlembicで管理するスキーマだけです。
-本番相当データが必要な場合も、本番から開発へ一方向に復元し、開発DBを本番へアップロードしません。
+開発DBと本番DBのデータは自動同期しません。同期するのはAlembicで管理するスキーマだけで、
+復元は本番から開発への一方向だけです。
 
 ## Parquetは差分で組み立てる
 
@@ -342,20 +291,14 @@ PostgreSQLはアプリケーション状態、GCS Parquetは価格・財務Obser
 
 **価格と財務の読み出し経路は1本で、常に分析層（Parquet）を読みます。**
 PostgreSQL側の観測テーブル（`market_price_observation`等）は`0002_drop_observed_tables`で
-廃止済みで、読む経路も置きません（`app/repositories/price_source.py`、`financial_source.py`）。
+廃止済みで、読む経路も置きません（`backend/app/repositories/price_source.py`、`financial_source.py`）。
 公開デモも同じ経路を通します。
 配備によってPostgreSQLとParquetを選ぶ二本立てにすると、採用する観測の選び方の答えが2つに
 なり、さらに**公開デモが本番で使わない経路を動かす**ことになるためです。
 
-実データとデモの分離は、コードの分岐ではなく**バケットの権限**で担保します。
-
-| 配備 | 読むバケット | サービスアカウント |
-|---|---|---|
-| 管理API（非公開） | `invest-dwh-db-storage` | `invest-admin-runtime@` |
-| 公開API | `invest-demo-lake` | `invest-public-api-runtime@` |
-
-公開APIのサービスアカウントは実データのバケットに権限を持たないため、`PARQUET_LAKE`
-を取り違えても実データは読めません。安全を環境変数の正しさに依存させません。
+実データとデモの分離は、コードの分岐ではなく**バケットの権限**で担保します
+（対応は[実行環境](#実行環境)のIAM表）。`PARQUET_LAKE`を取り違えても、公開APIの
+サービスアカウントは実データのバケットを読めません。
 
 分析層へ繋がらない場合もアプリは起動します。価格と財務が出ないだけの障害を全機能の停止に
 化けさせないためです。`/ready` が `analytics: unavailable` を返し、価格と財務の
@@ -366,8 +309,8 @@ DuckDB接続はアプリのlifespanで1つ持ち、起動時に温めます。�
 
 残りは日次ETLのPostgreSQLロードの廃止と、読まれなくなったテーブルの削除です。
 PostgreSQLには投資枠、テーマ、監視対象、関係、設定、Trigger Rule、対応履歴、取込メタデータを残します。
-DuckDB / dbtでDerivedやmartを生成し、GitHub Actionsで実行時間、再試行、並列性が不足した場合だけ、
-バッチ実行先をCloud Run Jobs等へ交換します。
+DuckDB / dbtでDerivedやmartを生成し、Airflowが財務Trigger系の依存・再試行・品質ゲートを管理します。
+処理量や可用性要件がローカルstandalone構成を超えた場合は、executorや実行先をCloud Run Jobs等へ交換します。
 
 責務分離の判断基準と、段階移行のうち未了の部分は
 [データ層の設計原則](data/design-principles.md#物理データフロー)を正本とします。
