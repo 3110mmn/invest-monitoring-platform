@@ -45,6 +45,10 @@ EXCLUDE_EXACT = (
     ".github/workflows/daily-update.yml",
     # 実運用DBのcleanup用。公開スナップショットのActionsに含めない。
     ".github/workflows/cleanup-public-demo.yml",
+    # `research/`を除外するため、それをimportするテストも出せない。公開側のCIは
+    # `backend/tests`を丸ごと収集するので、残すと`ModuleNotFoundError`で必ず落ちる。
+    # 検査対象の実体（`research/pbr_value_trap.py`）と同じ単位で外す。
+    "backend/tests/test_pbr_research.py",
     # dbt docsの生成はBigQueryへの認証を要し、`GCP_CREDENTIALS`は非公開側にしか無い。
     # 公開側へ置くとpushのたびに失敗して赤くなる。生成は非公開側で行い、成果物だけを
     # `--dbt-docs`で公開ツリーへ取り込む。
@@ -153,6 +157,46 @@ def dangling_references(root: Path, excluded: list[str]) -> list[str]:
     return problems
 
 
+# 除外したトップレベルパッケージをimportしている公開対象のPythonを探す。
+# markdownのリンク切れは`dangling_references`が見るが、importは見ていなかった。
+# `research/`を外したとき`backend/tests/test_pbr_research.py`が公開側に残り、
+# CIが`ModuleNotFoundError`で落ちた。公開してから気づいたので検査へ足す。
+IMPORT_STATEMENT = re.compile(
+    r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_]*)[.\s]|import\s+([A-Za-z_][A-Za-z0-9_]*))",
+    re.MULTILINE,
+)
+
+
+def dangling_imports(root: Path, excluded: list[str]) -> list[str]:
+    """公開ツリーのPythonが、除外したパッケージをimportしていないか調べる。"""
+    packages = {
+        path.split("/", 1)[0]
+        for path in excluded
+        if "/" in path and (REPO_ROOT / path.split("/", 1)[0] / "__init__.py").exists()
+    }
+    if not packages:
+        return []
+    problems: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        if relative in SCAN_SKIP:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            match = IMPORT_STATEMENT.match(line)
+            if not match:
+                continue
+            name = match.group(1) or match.group(2)
+            if name in packages:
+                problems.append(
+                    f"  {relative}:{number} 除外したパッケージ「{name}」をimportしている"
+                )
+    return problems
+
+
 def export(destination: Path) -> tuple[list[str], list[str]]:
     included, excluded = [], []
     for relative in tracked_files():
@@ -249,6 +293,7 @@ def main() -> int:
         return 1
 
     dangling = dangling_references(destination, list(excluded))
+    dangling += dangling_imports(destination, list(excluded))
     if dangling:
         shutil.rmtree(destination)
         print("除外したファイルへの参照が残っているため出力を破棄しました:")
