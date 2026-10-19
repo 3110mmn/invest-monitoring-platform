@@ -53,7 +53,7 @@ flowchart LR
 BigQueryを読みません。Parquet / DuckDBは日次運用とAPIの読み出し、BigQuery / dbtは
 複数年度・複数銘柄を横断する分析履歴です。どちらもGCS rawを原本とし、削除して作り直せます。
 
-公開デモには外部取得データを流しません。**同じコードを通し**、別バケットのsynthetic
+公開デモには外部取得データを流しません。同じコードを通し、別バケットのsynthetic
 Parquetと別PostgreSQLだけを参照します。分離はコードの分岐ではなくバケットの権限で
 担保します。
 
@@ -76,6 +76,7 @@ Rule・判定・対応履歴はPostgreSQLが持ちます。判定契約と実装
 
 ```mermaid
 flowchart LR
+    Raw[("GCS raw<br/>原本")]
     Lake[("GCS Parquet")]
     BQ[("BigQuery<br/>dbt marts")]
     Duck["DuckDB"]
@@ -84,6 +85,8 @@ flowchart LR
     API["FastAPI<br/>Trigger operations"]
     Web["Next.js<br/>Trigger Dashboard"]
 
+    Raw --> Lake
+    Raw --> BQ
     Lake --> Duck --> Research
     BQ --> Research
     Research -. "繰り返し使われた分析だけpromote" .-> AppDB

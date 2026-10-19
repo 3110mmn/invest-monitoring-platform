@@ -37,7 +37,7 @@ export interface TriggerEvaluation {
   evaluation_id: number; rule_version_id: number; rule_id: number;
   mode: "replay" | "live"; status: "fired" | "not_fired" | "unavailable";
   reason: string; observed_value: string | null; reference_value: string | null;
-  as_of_date: string; target_name: string; target_key: string;
+  as_of_date: string; evaluated_at: string; target_name: string; target_key: string;
   logic_operator: LogicOperator; conditions: TriggerCondition[];
   metric_key: MetricKey; comparison_type: ComparisonType; operator: Operator;
   threshold_value: string | null; evidence: Record<string, unknown>;

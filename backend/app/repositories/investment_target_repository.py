@@ -51,7 +51,7 @@ class InvestmentTargetRepository(BaseRepository):
         return self.execute_query("""
             SELECT a.*, w.status AS watchlist_status,
                    COALESCE(w.status = 'monitoring', FALSE) AS is_monitored,
-                   ta.membership_id, ta.effective_from
+                   ta.membership_id, ta.effective_from, ta.added_reason
             FROM theme_investment_target ta
             JOIN investment_target a ON ta.target_id = a.target_id
             LEFT JOIN watchlist_entry w ON w.target_id = a.target_id
@@ -131,24 +131,42 @@ class InvestmentTargetRepository(BaseRepository):
 
     # ---- theme_investment_target Write ----
 
-    def add_theme_investment_target(self, theme_id: int, target_id: int) -> bool:
+    def add_theme_investment_target(
+        self,
+        theme_id: int,
+        target_id: int,
+        *,
+        effective_from: datetime | None = None,
+        import_id: int | None = None,
+        reason: str | None = None,
+    ) -> bool:
         """現在の所属が無いときだけ、新しい有効期間を開始する。"""
-        now = datetime.now(UTC)
+        now = effective_from or datetime.now(UTC)
         self.execute_write("""
             INSERT INTO theme_investment_target
-                (theme_id, target_id, effective_from, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+                (theme_id, target_id, effective_from, added_import_id, added_reason,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(theme_id, target_id) WHERE effective_to IS NULL DO NOTHING
-        """, (theme_id, target_id, now, now, now))
+        """, (theme_id, target_id, now, import_id, reason, now, now))
         return True
 
-    def deactivate_theme_investment_target(self, theme_id: int, target_id: int) -> bool:
+    def deactivate_theme_investment_target(
+        self,
+        theme_id: int,
+        target_id: int,
+        *,
+        effective_to: datetime | None = None,
+        import_id: int | None = None,
+        reason: str | None = None,
+    ) -> bool:
         """現在の所属期間を閉じる。過去の所属行は上書きしない。"""
-        now = datetime.now(UTC)
+        now = effective_to or datetime.now(UTC)
         self.execute_write(
-            "UPDATE theme_investment_target SET effective_to = ?, updated_at = ? "
+            "UPDATE theme_investment_target "
+            "SET effective_to = ?, removed_import_id = ?, removed_reason = ?, updated_at = ? "
             "WHERE theme_id = ? AND target_id = ? AND effective_to IS NULL",
-            (now, now, theme_id, target_id),
+            (now, import_id, reason, now, theme_id, target_id),
         )
         return True
 
@@ -159,7 +177,7 @@ class InvestmentTargetRepository(BaseRepository):
         return self.execute_single("""
             SELECT a.*, w.status AS watchlist_status,
                    COALESCE(w.status = 'monitoring', FALSE) AS is_monitored,
-                   ta.membership_id, ta.effective_from
+                   ta.membership_id, ta.effective_from, ta.added_reason
             FROM theme_investment_target ta
             JOIN investment_target a ON ta.target_id = a.target_id
             LEFT JOIN watchlist_entry w ON w.target_id = a.target_id

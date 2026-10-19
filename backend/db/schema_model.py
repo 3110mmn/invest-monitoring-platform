@@ -384,6 +384,35 @@ ADD_COLUMN = re.compile(
     r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+ADD\s+COLUMN\s+(.+)$",
     re.IGNORECASE | re.DOTALL,
 )
+# `ADD COLUMN a TEXT, ADD COLUMN b TEXT` の2列目以降を切り出す。括弧の内側の
+# カンマ（CHECK (x IN ('a','b')) や NUMERIC(10,2)）では切らない。
+ADD_COLUMN_SEPARATOR = re.compile(r",\s*ADD\s+COLUMN\s+", re.IGNORECASE)
+
+
+def _split_add_column_clauses(definition: str) -> list[str]:
+    """1つのALTER TABLEが足す列定義を、列ごとに分ける。"""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    index = 0
+    while index < len(definition):
+        char = definition[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0:
+            match = ADD_COLUMN_SEPARATOR.match(definition, index)
+            if match:
+                parts.append(definition[start:index].strip())
+                start = match.end()
+                index = match.end()
+                continue
+        index += 1
+    parts.append(definition[start:].strip())
+    return [part for part in parts if part]
+
+
 DROP_COLUMN = re.compile(
     r"ALTER\s+TABLE\s+[\"`]?([A-Za-z_][A-Za-z0-9_]*)[\"`]?\s+"
     r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?[\"`]?([A-Za-z_][A-Za-z0-9_]*)",
@@ -467,14 +496,19 @@ def parse_schema(schema_path: Path | str | list[Path]) -> Schema:
                     table_name, definition = add_column_match.groups()
                     table = next((item for item in tables if item.name == table_name), None)
                     if table is not None:
-                        new_column = _parse_column(definition)
-                        table.columns.append(new_column)
-                        check_match = re.search(r"\bCHECK\s*\(", definition, re.IGNORECASE)
-                        if check_match:
-                            check_body, _ = _paren_content(
-                                definition, definition.index("(", check_match.start())
-                            )
-                            table.table_checks.append(" ".join(check_body.split()))
+                        # **1文で複数列を足す形を分ける。** PostgreSQLは
+                        # `ADD COLUMN a TEXT, ADD COLUMN b TEXT` を許す。これを1つの
+                        # 定義として読むと、2列目以降が黙って文書から消える
+                        # （0023で`removed_reason`が落ちた）。
+                        for part in _split_add_column_clauses(definition):
+                            new_column = _parse_column(part)
+                            table.columns.append(new_column)
+                            check_match = re.search(r"\bCHECK\s*\(", part, re.IGNORECASE)
+                            if check_match:
+                                check_body, _ = _paren_content(
+                                    part, part.index("(", check_match.start())
+                                )
+                                table.table_checks.append(" ".join(check_body.split()))
                     continue
                 add_check_match = ADD_CHECK_CONSTRAINT.match(statement)
                 if add_check_match:

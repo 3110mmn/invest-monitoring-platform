@@ -32,6 +32,26 @@ class ParquetSecuritySource:
             row = cursor.fetchone()
         return dict(zip(columns, row, strict=True)) if row else None
 
+    def find_by_jpx_code(self, jpx_code: str) -> dict[str, Any] | None:
+        """JPXコードで1銘柄を厳密に解決する。CSV取込時の名称は信用しない。"""
+        with analytics_query_lock():
+            cursor = self.conn.execute(
+                """
+                SELECT security_key, jpx_code, target_key, company_name,
+                       company_name_english, product_category_code,
+                       market_code, market_name,
+                       sector_17_code, sector_17_name, sector_33_code,
+                       sector_33_name, scale_category
+                FROM security_master
+                WHERE jpx_code = ?
+                LIMIT 1
+                """,
+                [jpx_code],
+            )
+            columns = [item[0] for item in cursor.description]
+            row = cursor.fetchone()
+        return dict(zip(columns, row, strict=True)) if row else None
+
     def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         """全銘柄マスタを名称・コードで検索する。投資対象への登録は行わない。"""
         with analytics_query_lock():

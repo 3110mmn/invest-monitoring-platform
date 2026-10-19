@@ -28,6 +28,11 @@ EXCLUDE_PREFIXES = (
     # Git管理外だが、取り違え防止のため明示する
     "memo/",
     "data/",
+    # 探索分析。何を検討して何を捨てたか、どの銘柄を見ているかが読み取れる。
+    # 利用規約には触れないが、個人の関心と進行中の検討を公開する必要は無い。
+    # 継続運用へ昇格した計算定義は `backend/analytics/derived/` と `analytics/dbt/`
+    # にあり、そちらは公開する。
+    "research/",
 )
 
 EXCLUDE_EXACT = (

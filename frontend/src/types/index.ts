@@ -50,6 +50,7 @@ export interface InvestmentTarget {
 export interface ThemeConstituent extends InvestmentTarget {
   membership_id: number;
   effective_from: string;
+  added_reason: string | null;
 }
 
 export type MandateStatus = "draft" | "active" | "suspended" | "retired";

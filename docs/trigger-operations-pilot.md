@@ -78,3 +78,33 @@ Rule・Responseは引き続きPostgreSQLの業務状態です。
 
 Trigger Rule自体の有用性や誤発火を評価するRule監査は、Outcomeと運用履歴が蓄積してから
 別の責務として設計します。`trigger_response`に監査結果は保存しません。
+
+## 小売20社Themeの準備
+
+EDINET DB Source Qualificationの対象20社は、CSVの社名ではなくJPXコードを全銘柄Parquetへ
+照合してThemeへ登録する。Investment Targetは必要な銘柄だけPostgreSQLへ遅延登録され、
+Watchlistには追加されない。
+
+```bash
+cd backend
+../venv/bin/python -m scripts.import_theme_members \
+  --theme-key retail-edinet-pilot \
+  --theme-name "EDINET DB 小売Pilot" \
+  --description "JPX小売業のうちEDINET DB Source Qualification済み20社" \
+  --csv ../取り込みデータ/Master/ThemeMembership/retail-edinet-pilot.csv \
+  --industry 小売業 \
+  --mode append \
+  --lake ../data/parquet \
+  --dry-run
+```
+
+確認後に`--dry-run`を外す。同じコマンドを再実行しても、Theme・Investment Target・現在所属は
+重複しない。`append`は追加だけを行う。CSVを特定時点の全構成として同期する場合は、意図しない
+手動Membershipの除外を避けるため、明示的に次を指定する。
+
+```bash
+  --mode replace --snapshot-at 2026-10-19
+```
+
+`replace`はCSVにない現在Membershipの`effective_to`を`snapshot_at`で閉じ、CSV原本の参照先・
+SHA-256・追加／除外／継続件数を`theme_membership_import`へ保存する。

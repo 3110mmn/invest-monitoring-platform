@@ -1,8 +1,9 @@
 BACKEND_IMAGE ?= invest-monitoring-api:local
 FRONTEND_IMAGE ?= invest-monitoring-frontend:local
 DATABASE_URL ?= postgresql://invest:invest@localhost:5432/invest
+DEV_DATABASE_URL := postgresql://invest:invest@localhost:5432/invest
 
-.PHONY: db-up db-down db-migrate db-test-create db-provision-roles docker-build docker-run frontend-docker-build frontend-docker-run research-pbr airflow-up airflow-down airflow-logs
+.PHONY: dev-up dev-migrate dev-api db-up db-down db-migrate db-test-create db-provision-roles docker-build docker-run frontend-docker-build frontend-docker-run research-pbr airflow-up airflow-down airflow-logs
 
 RESEARCH_LAKE ?= data/parquet
 
@@ -11,6 +12,19 @@ db-up:
 
 db-down:
 	docker compose down
+
+# `.env` がNeonを向いていても、開発操作は必ずDocker PostgreSQLへ接続する。
+dev-up:
+	docker compose up -d postgres
+
+dev-migrate:
+	DATABASE_URL="$(DEV_DATABASE_URL)" venv/bin/alembic -c backend/alembic.ini upgrade head
+
+dev-api:
+	cd backend && \
+		DATABASE_URL="$(DEV_DATABASE_URL)" \
+		DATABASE_ENVIRONMENT_OVERRIDE=development \
+		../venv/bin/uvicorn app.main:app --reload --port 8000
 
 airflow-up:
 	docker compose -f compose.yaml -f compose.airflow.yaml up -d --build airflow

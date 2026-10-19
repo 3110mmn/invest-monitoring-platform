@@ -31,6 +31,23 @@ cd frontend
 npm ci
 ```
 
+普段の画面確認では、Neon向けの`.env`を誤って使わないよう、開発DB固定のtargetを使用します。
+
+```bash
+# Docker PostgreSQLを起動
+make dev-up
+
+# Dockerの開発DBだけをAlembic headへ更新
+make dev-migrate
+
+# DATABASE_URLをDocker開発DBへ固定してFastAPIを起動
+make dev-api
+```
+
+`dev-api`で起動した場合、`http://localhost:3000`の環境バナーは「開発環境」と表示されます。
+これらのtargetは`backend/.env`がNeonを向いていても、`postgresql://invest:invest@localhost:5432/invest`
+を明示的に上書きします。
+
 ### 起動
 
 ```bash

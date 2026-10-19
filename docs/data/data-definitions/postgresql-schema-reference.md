@@ -17,7 +17,7 @@
 | `ingestion_run` | 16 | `ingestion_run_id` |
 | `ingestion_error` | 9 | `error_id` |
 | `investment_target_identifier` | 10 | `investment_target_identifier_id` |
-| `theme_investment_target` | 7 | `membership_id` |
+| `theme_investment_target` | 11 | `membership_id` |
 | `capital_allocation_mandate` | 7 | `mandate_id` |
 | `mandate_version` | 18 | `mandate_version_id` |
 | `mandate_target_assignment` | 12 | `assignment_id` |
@@ -29,6 +29,7 @@
 | `trigger_response` | 9 | `response_id` |
 | `trigger_rule_assignment` | 8 | `assignment_id` |
 | `trigger_rule_condition` | 7 | `condition_id` |
+| `theme_membership_import` | 14 | `import_id` |
 
 ## テーブル間の関係
 
@@ -54,6 +55,7 @@ erDiagram
     capital_allocation_mandate ||--o{ trigger_rule_assignment : mandate_id
     theme ||--o{ trigger_rule_assignment : theme_id
     trigger_rule_version ||--o{ trigger_rule_condition : rule_version_id
+    theme ||--o{ theme_membership_import : theme_id
 ```
 
 ## テーブル定義
@@ -63,7 +65,7 @@ erDiagram
 | 列 | 型 | NULL | 既定値 | 列挙値 |
 |---|---|---|---|---|
 | `theme_id` | BIGINT | NO | `AS` | - |
-| `theme_key` | TEXT | NO | - | - |
+| `theme_key` | TEXT | NO | `( 'theme-' || LPAD(nextval('theme_key_seq')::TEXT, 6, '0') )` | - |
 | `theme_name` | TEXT | NO | - | - |
 | `description` | TEXT | YES | - | - |
 | `is_active` | BOOLEAN | NO | `TRUE` | - |
@@ -180,6 +182,10 @@ erDiagram
 | `effective_to` | TIMESTAMPTZ | YES | - | - |
 | `created_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
 | `updated_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+| `added_import_id` | BIGINT | YES | - | - |
+| `removed_import_id` | BIGINT | YES | - | - |
+| `added_reason` | TEXT | YES | - | - |
+| `removed_reason` | TEXT | YES | - | - |
 
 - 主キー: `membership_id`
 - 外部キー: `theme_id` → `theme`(`theme_id`)
@@ -411,3 +417,27 @@ erDiagram
 - 一意キー: `rule_version_id`, `position`
 - 外部キー: `rule_version_id` → `trigger_rule_version`(`rule_version_id`)（ON DELETE CASCADE）
 - テーブルCHECK: `(comparison_type = 'sign_transition' AND operator IN ('crosses_below', 'crosses_above') AND threshold_value IS NULL) OR (comparison_type <> 'sign_transition' AND operator IN ('lt', 'lte', 'gt', 'gte') AND threshold_value IS NOT NULL)`
+
+### `theme_membership_import`
+
+| 列 | 型 | NULL | 既定値 | 列挙値 |
+|---|---|---|---|---|
+| `import_id` | BIGINT | NO | `AS` | - |
+| `theme_id` | BIGINT | NO | - | - |
+| `snapshot_at` | TIMESTAMPTZ | NO | - | - |
+| `import_mode` | TEXT | NO | - | `append`, `replace` |
+| `artifact_name` | TEXT | NO | - | - |
+| `artifact_ref` | TEXT | NO | - | - |
+| `artifact_hash` | TEXT | NO | - | - |
+| `rationale` | TEXT | YES | - | - |
+| `actor` | TEXT | NO | `'owner'` | - |
+| `input_count` | INTEGER | NO | - | - |
+| `added_count` | INTEGER | NO | - | - |
+| `removed_count` | INTEGER | NO | - | - |
+| `unchanged_count` | INTEGER | NO | - | - |
+| `imported_at` | TIMESTAMPTZ | NO | `CURRENT_TIMESTAMP` | - |
+
+- 主キー: `import_id`
+- 一意キー: `theme_id`, `snapshot_at`, `import_mode`, `artifact_hash`
+- 外部キー: `theme_id` → `theme`(`theme_id`)
+- インデックス `idx_theme_membership_import_theme_snapshot`: `theme_id`, `snapshot_at DESC`

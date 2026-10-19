@@ -174,3 +174,44 @@ def test_demo_parquet_cannot_be_published_to_the_real_bucket(tmp_path):
     """
     with pytest.raises(SystemExit, match="invest-demo-lake"):
         seed_demo.publish_demo_parquet(tmp_path, "gs://invest-dwh-db-storage/lake")
+
+
+def test_demo_triggers_fill_the_default_work_queue():
+    """公開デモの既定表示に、発火案件と対応履歴の両方が出ること。
+
+    公開デモからTriggerは作成・評価できない。それでも中身を置くのは、空の画面では
+    何を記録する仕組みなのかが伝わらないためである。
+
+    **既定は要対応（`actionable`）なので、発火が全部対応済みだと画面が空に見える。**
+    未対応の発火と、対応済みの発火を両方置いて、判定カードと対応履歴の双方が
+    見えるようにする。
+    """
+    triggers = seed_demo._demo_triggers()
+    fired = [item for item in triggers if item.status == "fired"]
+    assert fired, "発火案件が無いと判定カードが出ない"
+    assert any(item.response_disposition is None for item in fired), (
+        "未対応の発火が無いと、既定の要対応が空になる"
+    )
+    assert any(item.response_disposition is not None for item in fired), (
+        "対応済みの発火が無いと、対応履歴の表示が見えない"
+    )
+    assert any(len(item.conditions) > 1 for item in triggers), (
+        "複数条件のRuleが無いと、ALL結合の表示が見えない"
+    )
+
+
+def test_demo_trigger_evidence_has_values_for_every_condition(demo_db):
+    """複合Ruleのデモでも、全条件の評価値・参照値・判定を表示できる。"""
+    seed_demo.seed(demo_db, replace=True)
+
+    row = demo_db.execute(
+        "SELECT evidence, observed_value, reference_value FROM trigger_evaluation "
+        "WHERE event_key = 'demo-0001-fy:operating_income'"
+    ).fetchone()
+    assert row is not None
+    assert row["observed_value"] is None
+    assert row["reference_value"] is None
+    assert len(row["evidence"]["conditions"]) == 2
+    assert [item["status"] for item in row["evidence"]["conditions"]] == ["fired", "fired"]
+    assert all(item["observed_value"] is not None for item in row["evidence"]["conditions"])
+    assert all(item["reference_value"] is not None for item in row["evidence"]["conditions"])

@@ -71,6 +71,17 @@ const evidenceText = (evidence: Record<string, unknown>, key: string) => {
   return value == null ? "—" : String(value);
 };
 
+const recordValue = (value: unknown): Record<string, unknown> =>
+  value != null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+
+const statusText = (value: unknown) => value === "fired" ? "条件該当"
+  : value === "not_fired" ? "条件非該当" : "判定不能";
+
+const formatDateTime = (value: string) => new Intl.DateTimeFormat("ja-JP", {
+  dateStyle: "short", timeStyle: "short", timeZone: "Asia/Tokyo",
+}).format(new Date(value));
+
 type ConditionDraft = Omit<TriggerCondition, "threshold_value"> & { threshold_value: string };
 const defaultCondition = (): ConditionDraft => ({
   metric_key: "operating_income", comparison_type: "forecast_variance",
@@ -96,20 +107,37 @@ function EvaluationCard({ item }: { item: TriggerEvaluation }) {
     return () => { cancelled = true; };
   }, [item.evaluation_id]);
   const format = (value: string | null) => value == null ? "—" : Number(value).toLocaleString("ja-JP");
+  const memberEvidence = Array.isArray(item.evidence.conditions) ? item.evidence.conditions : [];
   return <article id={`evaluation-${item.evaluation_id}`} className="space-y-3 rounded border bg-white p-4">
     <h3 className="font-semibold">{item.target_name}（{item.target_key}）</h3>
     <p>{item.conditions.map(conditionText).join(item.logic_operator === "all" ? " かつ " : " または ")}</p>
     <p>{item.status === "fired" ? "条件該当" : item.status === "not_fired" ? "条件非該当" : "判定不能"}</p>
     <p>発火時の判断方針：{DECISION_LABELS[item.on_fire_decision]}（人間の確認が必要）</p>
     {item.conditions.length === 1 && <p>評価値：{format(item.observed_value)} ／ 参照値：{format(item.reference_value)} ／ 閾値：{format(item.threshold_value)}</p>}
+    {item.conditions.length > 1 && <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead><tr className="text-left"><th className="py-1 pr-3">条件</th><th className="py-1 pr-3">判定</th><th className="py-1 pr-3">評価値</th><th className="py-1 pr-3">参照値</th></tr></thead>
+        <tbody>{item.conditions.map((condition, index) => {
+          const member = recordValue(memberEvidence[index]);
+          return <tr key={index} className="border-t">
+            <td className="py-1 pr-3">{conditionText(condition)}</td>
+            <td className="py-1 pr-3">{statusText(member.status)}</td>
+            <td className="py-1 pr-3">{member.observed_value == null ? "—" : Number(member.observed_value).toLocaleString("ja-JP")}</td>
+            <td className="py-1 pr-3">{member.reference_value == null ? "—" : Number(member.reference_value).toLocaleString("ja-JP")}</td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>}
     {item.status === "unavailable" && <p className="text-sm text-gray-600">
       判定できない理由：{reasonText(item.reason, item.comparison_type)}
     </p>}
     <dl className="grid gap-2 text-sm md:grid-cols-2">
       <div><dt className="font-medium">実績開示</dt><dd>{evidenceText(item.evidence, "actual_disclosure_number")}</dd></div>
-      <div><dt className="font-medium">参照開示</dt><dd>{evidenceText(item.evidence, "prior_disclosure_number")}</dd></div>
-      <div><dt className="font-medium">実績値</dt><dd>{evidenceText(item.evidence, "current_value")}</dd></div>
-      <div><dt className="font-medium">利用可能日</dt><dd>{evidenceText(item.evidence, "available_on")}</dd></div>
+      {item.conditions.length === 1 && <div><dt className="font-medium">参照開示</dt><dd>{evidenceText(item.evidence, "prior_disclosure_number")}</dd></div>}
+      {item.conditions.length === 1 && <div><dt className="font-medium">実績値</dt><dd>{evidenceText(item.evidence, "current_value")}</dd></div>}
+      <div><dt className="font-medium">情報開示日</dt><dd>{evidenceText(item.evidence, "actual_disclosed_date")}</dd></div>
+      <div><dt className="font-medium">判定基準日</dt><dd>{item.as_of_date}</dd></div>
+      <div><dt className="font-medium">発火・評価日時</dt><dd>{formatDateTime(item.evaluated_at)}</dd></div>
     </dl>
     <details><summary className="cursor-pointer">判定根拠・来歴</summary>
       <pre className="overflow-auto text-xs">{JSON.stringify(item.evidence, null, 2)}</pre>

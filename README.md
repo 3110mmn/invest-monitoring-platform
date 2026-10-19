@@ -24,11 +24,12 @@
 | ETL | 増分取得、冪等UPSERT、部分失敗、rate limit、raw保存、取込実行・エラー履歴 |
 | API | FastAPIのRouter / Repository / ETLを分離。公開系と管理系を同一イメージ・異なる権限で運用 |
 | Web | Next.jsで投資枠、ウォッチリスト、テーマ、株価、財務実績・会社予想・開示履歴を表示 |
+| 予兆管理 | 仮説が崩れる条件を先に登録し、開示のたびに機械判定。発火は売買指示ではなく見直し要求として、対応履歴まで残す |
 | Cloud | Cloud Run、Neon PostgreSQL、GCS、Artifact Registry、Secret Manager、IAMを利用 |
 | 運用 | GitHub ActionsによるCI/CD・日次ETL・バックアップ、readiness、復元検証 |
 | 分析基盤 | GCS raw → BigQuery → dbt（staging / intermediate / marts）。point-in-timeの不変条件をテストで固定 |
 | オーケストレーション | Airflowで取得→BigQuery→dbt品質ゲート→Trigger評価を1本のDAGに。**ローカルstandaloneでの検証段階**で、常時稼働はGitHub Actionsが担う |
-| 品質 | PostgreSQLを使うバックエンドテスト346件、フロントエンドテスト5件、型・lint・build検証 |
+| 品質 | バックエンドテストは実PostgreSQLに対して実行。型・lint・build検証をCIで固定 |
 
 ### dbt docs（モデルの依存グラフ・テスト・SQL）
 
@@ -120,14 +121,23 @@
   ベンチマーク・レビュー周期をversion管理し、有効期間つきで履歴を残す
 - **監視対象を管理する** — 全上場銘柄（約4,400）のマスタから検索して登録し、検討中／監視中／
   監視停止の状態で持つ。テーマ×投資対象の所属も期間で管理する
+- **テーマ構成を時点つきで入れ替える** — 構成銘柄をCSVで取り込み、追加・除外・継続の差分と、
+  CSV原本の参照先・SHA-256・取込時点を記録する。原本はDBへ入れず、ハッシュだけで同一性を
+  担保する。追加・除外の理由も所属行へ残すため、**後から「いつ・何を根拠に構成を変えたか」を
+  復元できる**
 - **価格を増分取得する** — 取得元別の観測として保持し、同じ日に複数の取得元がある場合の
   採用規則を1か所で決める
 - **財務開示を履歴として持つ** — 実績、会社予想、予想改訂を開示時点のまま保持する
 - **来歴を辿る** — 分析層の値から取得元・取込実行・取得時点をたどり、GCS上のrawまで遡る
-- **継続監視の条件を登録して判定する** — 通期の売上高・営業利益・純利益について、期初予想比・
-  前年比・絶対値・符号転換をRuleとして登録する。判定結果（`fired` / `not_fired` /
-  `unavailable`）と当時のEvidence、発火後の対応方針を履歴として残す。Ruleの変更は
-  追記型versionで扱い、過去の判定は書き換えない
+- **仮説が崩れる予兆を取りこぼさない** — 買ったときの前提は、決算をまたぐと静かに変わる。
+  だが保有銘柄が増えるほど、全部の開示を毎回読み直すのは続かない。そこで「この前提が
+  崩れたと見なす条件」を先に登録しておき、開示が出た時点で機械的に判定する。
+  通期の売上高・営業利益・純利益について、期初予想比・前年比・絶対値・符号転換を扱う。
+
+  **発火は売買の指示ではなく、人間への見直し要求である。** 判定結果（`fired` /
+  `not_fired` / `unavailable`）と当時のEvidence、そして人がどう対応したかを履歴に残す。
+  後から「予兆は出ていたのに動かなかったのか、そもそも条件が悪かったのか」を切り分ける
+  ためで、Ruleの変更は追記型versionで扱い、過去の判定は書き換えない
 - **時点整合を保って予想と実績を比べる** — 会社予想は期中に何度も出し直されるため、各予想へ
   有効期間を持たせ、「その時点で見えていた予想」だけを使う。
 - **公開デモで入力を試せる** — 架空データ環境で、期限付きの投資枠だけ誰でも作成・編集できる。
@@ -259,7 +269,7 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 
 | | |
 |---|---|
-| テスト | バックエンド293件（実PostgreSQLに対して実行） / フロントエンド5件 |
+| テスト | バックエンドはモックではなく実PostgreSQLに対して実行 / フロントエンドはVitest |
 | CI | PRとmainへのpushで lint・型・テスト・Dockerビルドを実行 |
 | ドキュメント整合 | スキーマとデータ定義書の乖離を**CIで検出**。更新漏れはテストが落ちる |
 | バックアップ | イミュータブルバックアップを日次取得し、**復元を実際に検証** |
@@ -277,5 +287,4 @@ Alembic migrationから自動生成し、手書きのデータ定義書との不
 | 保存先ごとの列定義（PostgreSQL / Parquet / BigQuery） | [docs/data/data-definitions/](docs/data/data-definitions/README.md) |
 | 継続監視条件の判定契約と運用範囲 | [docs/trigger-operations-pilot.md](docs/trigger-operations-pilot.md) |
 | 取得からTrigger評価までの実行制御 | [orchestration/airflow/README.md](orchestration/airflow/README.md) |
-| 探索分析の記録と測定結果 | [research/README.md](research/README.md) |
 | セットアップ・検証 | [docs/development.md](docs/development.md) |

@@ -6,7 +6,7 @@ def test_theme_repository_filters_active_rows(db):
     repo = ThemeRepository(db)
     active_id = repo.create({"theme_key": "active", "theme_name": "Active"})
     inactive_id = repo.create({"theme_key": "inactive", "theme_name": "Inactive"})
-    repo.soft_delete(inactive_id)
+    repo.update(inactive_id, {"is_active": False})
 
     assert [row["theme_id"] for row in repo.find_all(is_active=True)] == [active_id]
 

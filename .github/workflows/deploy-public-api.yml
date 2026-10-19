@@ -130,6 +130,12 @@ jobs:
           test "${actual_service_account}" = "${RUNTIME_SERVICE_ACCOUNT}"
           curl --fail --show-error --silent "${url}/health"
           curl --fail --show-error --silent "${url}/ready"
+          redirect_headers="$(curl --silent --show-error --dump-header - --output /dev/null \
+            --max-redirs 0 \
+            --header "X-Forwarded-Proto: https" \
+            "${url}/api/themes?is_active=true")"
+          echo "${redirect_headers}" | grep -qE '^HTTP/[0-9.]+ 307'
+          echo "${redirect_headers}" | grep -qiE '^location: https://'
           for origin in "${FRONTEND_STATUS_URL}" "${FRONTEND_REGIONAL_URL}"; do
             cors_headers="$(curl --fail --show-error --silent --include \
               --header "Origin: ${origin}" \

@@ -37,6 +37,7 @@ _TABLES = (
     "mandate_version",
     "capital_allocation_mandate",
     "theme_investment_target",
+    "theme_membership_import",
     "watchlist_entry",
     "investment_target_identifier",
     "ingestion_error",

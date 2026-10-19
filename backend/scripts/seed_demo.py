@@ -38,6 +38,7 @@ import os
 import random
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -72,6 +73,12 @@ REVISION_FISCAL_YEAR = 2026
 PRICE_DAYS = 500
 
 TRUNCATE_ORDER = (
+    "trigger_response",
+    "trigger_evaluation",
+    "trigger_rule_condition",
+    "trigger_rule_assignment",
+    "trigger_rule_version",
+    "trigger_rule",
     "mandate_target_assignment",
     "mandate_version",
     "capital_allocation_mandate",
@@ -199,6 +206,12 @@ THEME_MEMBERS = [
 # APIが編集・削除を404で拒否し（`_require_public_demo_mandate`）、cleanupの対象にも
 # ならない。公開デモを開いた瞬間に機能が見える状態をこれで作る。枠が0件だと、
 # 訪問者は何ができるのか分からないまま空の画面を見ることになる。
+# 継続監視条件のデモ。判定は実運用（live）だけを置く。過去再生は人が対応すべき
+# 案件ではなく、作業キューにも出さないため、デモにも含めない。
+DEMO_TRIGGER_DISCLOSED = date(2026, 5, 14)
+DEMO_TRIGGER_AVAILABLE = date(2026, 5, 15)
+DEMO_TRIGGER_DEFINITION_VERSION = "demo-metric-comparison-v1"
+
 DEMO_TOTAL_BUDGET = Decimal("30000000")
 DEMO_BUDGET_CURRENCY = "JPY"
 
@@ -813,6 +826,202 @@ def publish_demo_parquet(local_dir: Path, destination: str) -> None:
         raise SystemExit(f"デモParquetの公開に失敗しました: {result.stderr.strip()[:300]}")
 
 
+@dataclass(frozen=True)
+class DemoTrigger:
+    """デモへ置く継続監視条件と、その判定・対応。"""
+
+    target_key: str
+    rationale: str
+    on_fire_decision: str
+    conditions: tuple[tuple[str, str, str, Decimal], ...]
+    status: str
+    # conditionsと同じ順番の (評価値, 参照値, 実績値)。複合Ruleでも各条件の
+    # Evidenceを欠落させず、実運用のevaluate_conditionsと同じ形にする。
+    values: tuple[tuple[Decimal, Decimal, Decimal], ...]
+    response_disposition: str | None = None
+    response_rationale: str = ""
+    response_next_review_on: date | None = None
+
+
+def _demo_triggers() -> tuple[DemoTrigger, ...]:
+    """デモへ置く継続監視条件。テストから中身を確かめられるよう関数にする。"""
+    return (
+        DemoTrigger(
+            target_key="ALPHA.DEMO",
+            rationale="設備投資の回収が想定どおり進んでいるかを決算ごとに確かめる",
+            on_fire_decision="investigate",
+            conditions=(
+                ("operating_income", "forecast_variance", "lte", Decimal("-20")),
+                ("operating_income", "yoy", "lte", Decimal("-10")),
+            ),
+            status="fired",
+            values=(
+                (Decimal("-24.8"), Decimal("18200000000"), Decimal("13686400000")),
+                (Decimal("-12.0"), Decimal("15552727272.7273"), Decimal("13686400000")),
+            ),
+        ),
+        DemoTrigger(
+            target_key="BETA.DEMO",
+            rationale="受注の端境期に売上が落ち込まないかを見る",
+            on_fire_decision="review_allocation",
+            conditions=(("revenue", "yoy", "lte", Decimal("-15")),),
+            status="not_fired",
+            values=((Decimal("4.2"), Decimal("9800000000"), Decimal("10211600000")),),
+        ),
+        DemoTrigger(
+            target_key="GAMMA.DEMO",
+            rationale="燃料価格の変動が通期の採算に出ていないかを見る",
+            on_fire_decision="investigate",
+            conditions=(("operating_income", "forecast_variance", "lte", Decimal("-15")),),
+            status="fired",
+            values=((Decimal("-18.3"), Decimal("7400000000"), Decimal("6045800000")),),
+            response_disposition="accepted",
+            response_rationale="一過性の燃料高が主因だった。前提は維持し、次の四半期で確認する",
+        ),
+    )
+
+
+def _insert_curated_triggers(connection: Connection, target_ids: dict[str, int]) -> int:
+    """運営が置く継続監視条件と、その判定・対応を入れる。
+
+    **公開デモからは作成・評価・対応ができない。** `editable` が false になり、
+    APIもデモ環境では書き込みを拒否する。それでも中身を置くのは、空の画面では
+    何を記録する仕組みなのかが伝わらないためである。
+
+    発火1件と非発火1件を置き、発火側には対応履歴を付ける。これで判定カード、
+    Evidence、対応履歴、作業キューの絞り込みがすべて画面に出る。
+
+    judgement契約どおり、Evidenceには当時見えていた開示番号と値を固定する。
+    `mode` は実運用のみ。過去再生は人が対応すべき案件ではないため置かない。
+    """
+    rules = _demo_triggers()
+
+    saved = 0
+    for index, rule in enumerate(rules, start=1):
+        target_id = target_ids[rule.target_key]
+        rule_id = connection.execute(
+            "INSERT INTO trigger_rule (rule_key) VALUES (?) RETURNING rule_id",
+            (f"demo-trigger-{index}",),
+        ).fetchone()["rule_id"]
+        version_id = connection.execute(
+            """
+            INSERT INTO trigger_rule_version
+                (rule_id, version, definition_key, rationale, on_fire_decision, logic_operator)
+            VALUES (?, 1, 'financial_metric_comparison', ?, ?, 'all')
+            RETURNING rule_version_id
+            """,
+            (rule_id, rule.rationale, rule.on_fire_decision),
+        ).fetchone()["rule_version_id"]
+        connection.execute(
+            """
+            INSERT INTO trigger_rule_assignment (rule_version_id, scope_type, target_id)
+            VALUES (?, 'investment_target', ?)
+            """,
+            (version_id, target_id),
+        )
+        for position, condition in enumerate(rule.conditions, start=1):
+            metric, comparison, operator, threshold = condition
+            connection.execute(
+                """
+                INSERT INTO trigger_rule_condition
+                    (rule_version_id, position, metric_key, comparison_type, operator, threshold_value)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (version_id, position, metric, comparison, operator, threshold),
+            )
+
+        disclosure = f"demo-{index:04d}-fy"
+        common_evidence = {
+            "target_key": rule.target_key,
+            "actual_disclosure_number": disclosure,
+            "actual_disclosed_date": DEMO_TRIGGER_DISCLOSED.isoformat(),
+            "reporting_scope": "consolidated",
+            "accounting_standard": "JP",
+        }
+        # 条件ごとのEvidence。`evidence`キーは入れ子のdictで、下で`{**...}`で
+        # 展開するため、要素型を明示しないと`object`と推論される。
+        members: list[dict[str, Any]] = []
+        for position, (condition, values) in enumerate(
+            zip(rule.conditions, rule.values, strict=True), start=1
+        ):
+            metric, comparison, operator, threshold = condition
+            observed, reference, current = values
+            member_status = "fired" if operator == "lte" and observed <= threshold else "not_fired"
+            child_evidence = {
+                **common_evidence,
+                "metric_key": metric,
+                "comparison_type": comparison,
+                "prior_disclosure_number": f"demo-{index:04d}-{comparison}-prior",
+                "available_on": DEMO_TRIGGER_AVAILABLE.isoformat(),
+                "current_value": str(current),
+                "reference_value": str(reference),
+                "observed_value": str(observed),
+                "input_status": "ok",
+                "operator": operator,
+                "threshold_value": str(threshold),
+            }
+            members.append({
+                "position": position,
+                "metric_key": metric,
+                "comparison_type": comparison,
+                "operator": operator,
+                "threshold_value": str(threshold),
+                "status": member_status,
+                "reason": "ok",
+                "observed_value": str(observed),
+                "reference_value": str(reference),
+                "evidence": child_evidence,
+            })
+        evidence = (
+            {**members[0]["evidence"], "logic_operator": "all", "conditions": members}
+            if len(members) == 1
+            else {**common_evidence, "logic_operator": "all", "conditions": members}
+        )
+        payload = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+        scalar_observed = rule.values[0][0] if len(rule.values) == 1 else None
+        scalar_reference = rule.values[0][1] if len(rule.values) == 1 else None
+        evaluation_id = connection.execute(
+            """
+            INSERT INTO trigger_evaluation
+                (rule_version_id, target_id, mode, event_key, as_of_date, status, reason,
+                 observed_value, reference_value, evidence, evidence_hash, definition_version,
+                 on_fire_decision)
+            VALUES (?, ?, 'live', ?, ?, ?, 'ok', ?, ?, ?::jsonb, ?, ?, ?)
+            RETURNING evaluation_id
+            """,
+            (
+                version_id,
+                target_id,
+                f"{disclosure}:{rule.conditions[0][0]}",
+                DEMO_TRIGGER_AVAILABLE,
+                rule.status,
+                scalar_observed,
+                scalar_reference,
+                payload,
+                hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+                DEMO_TRIGGER_DEFINITION_VERSION,
+                rule.on_fire_decision,
+            ),
+        ).fetchone()["evaluation_id"]
+        saved += 1
+
+        if rule.response_disposition is not None:
+            connection.execute(
+                """
+                INSERT INTO trigger_response
+                    (evaluation_id, disposition, rationale, next_review_on)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    evaluation_id,
+                    rule.response_disposition,
+                    rule.response_rationale,
+                    rule.response_next_review_on,
+                ),
+            )
+    return saved
+
+
 def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[str, int]:
     """デモデータを投入する。
 
@@ -838,6 +1047,8 @@ def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[
     target_ids = _insert_masters(connection, source_id)
     # 運営が置く投資枠。期限を持たないので訪問者からは編集できず、cleanupでも消えない。
     mandates = _insert_curated_mandates(connection, target_ids)
+    # 継続監視条件。公開デモからは編集できないが、何を記録する仕組みかを示す。
+    triggers = _insert_curated_triggers(connection, target_ids)
     # 価格も財務もPostgreSQLへ入れない。読み出し経路は分析層の1本だけなので、
     # Parquetへ書く。PostgreSQLに残るのはテーマ・監視対象・構成だけになる。
     return {
@@ -846,6 +1057,7 @@ def seed(connection: Connection, *, replace: bool, force: bool = False) -> dict[
         "price_run": price_run,
         "financial_run": financial_run,
         "mandates": mandates,
+        "triggers": triggers,
     }
 
 

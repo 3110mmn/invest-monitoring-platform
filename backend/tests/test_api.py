@@ -263,12 +263,22 @@ def test_create_and_get_theme(client):
     assert fetched.json()["theme_key"] == "rates"
 
 
+def test_theme_key_is_generated_when_omitted(client):
+    created = client.post(
+        "/api/themes/",
+        json={"theme_name": "自動採番テーマ", "description": "keyは内部ID"},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["theme_key"].startswith("theme-")
+
+
 def test_duplicate_theme_key_returns_conflict(client):
     assert client.post("/api/themes/", json=theme_payload()).status_code == 201
     assert client.post("/api/themes/", json=theme_payload()).status_code == 409
 
 
-def test_update_and_soft_delete_theme(client):
+def test_update_archive_and_hard_delete_unused_active_theme(client):
     theme_id = client.post("/api/themes/", json=theme_payload()).json()["theme_id"]
     updated = client.put(f"/api/themes/{theme_id}", json={"theme_name": "New name"})
     assert updated.status_code == 200
@@ -276,7 +286,65 @@ def test_update_and_soft_delete_theme(client):
 
     deleted = client.delete(f"/api/themes/{theme_id}")
     assert deleted.status_code == 204
-    assert client.get(f"/api/themes/{theme_id}").json()["is_active"] is False
+    assert client.get(f"/api/themes/{theme_id}").status_code == 404
+
+
+def test_archived_theme_is_hidden_by_default_filter_and_can_be_restored(client):
+    theme_id = client.post("/api/themes/", json=theme_payload()).json()["theme_id"]
+    archived = client.put(f"/api/themes/{theme_id}", json={"is_active": False})
+    assert archived.status_code == 200
+    assert archived.json()["is_active"] is False
+
+    active_rows = client.get("/api/themes/?is_active=true").json()
+    assert all(row["theme_id"] != theme_id for row in active_rows)
+    all_rows = client.get("/api/themes/").json()
+    assert any(row["theme_id"] == theme_id for row in all_rows)
+
+    restored = client.put(f"/api/themes/{theme_id}", json={"is_active": True})
+    assert restored.status_code == 200
+    assert restored.json()["is_active"] is True
+
+
+def test_duplicate_active_theme_name_returns_conflict(client):
+    assert client.post("/api/themes/", json=theme_payload()).status_code == 201
+    duplicate = client.post(
+        "/api/themes/",
+        json={"theme_name": "  Rates  ", "description": "別定義"},
+    )
+    assert duplicate.status_code == 409
+
+
+def test_archived_name_can_be_reused_but_cannot_be_restored_while_duplicate_is_active(client):
+    original_id = client.post("/api/themes/", json=theme_payload()).json()["theme_id"]
+    client.put(f"/api/themes/{original_id}", json={"is_active": False})
+    replacement = client.post(
+        "/api/themes/", json={"theme_name": "Rates", "description": "新定義"}
+    )
+    assert replacement.status_code == 201
+
+    restored = client.put(f"/api/themes/{original_id}", json={"is_active": True})
+    assert restored.status_code == 409
+
+
+def test_theme_with_membership_history_cannot_be_hard_deleted(client, db):
+    theme_id = db.execute(
+        "INSERT INTO theme (theme_key, theme_name, is_active) VALUES ('used', 'Used', FALSE)"
+    ).lastrowid
+    target_id = db.execute(
+        "INSERT INTO investment_target (target_key, target_name, target_type) "
+        "VALUES ('used-target', 'Used Target', 'individual_stock')"
+    ).lastrowid
+    db.execute(
+        "INSERT INTO theme_investment_target (theme_id, target_id) VALUES (?, ?)",
+        (theme_id, target_id),
+    )
+    db.commit()
+
+    deleted = client.delete(f"/api/themes/{theme_id}")
+
+    assert deleted.status_code == 409
+    assert "アーカイブ" in deleted.json()["error"]["message"]
+    assert client.get(f"/api/themes/{theme_id}").status_code == 200
 
 
 def test_missing_theme_returns_not_found(client):
@@ -469,6 +537,17 @@ def test_theme_summary_and_detail_agree_on_types(client, db):
     assert summary["theme_name"] == detail["theme_name"]
 
 
+def test_theme_summary_excludes_archived_by_default_and_can_include_it(client, db):
+    theme_id = _seed_theme(db, "archived", "Archived")
+    client.put(f"/api/themes/{theme_id}", json={"is_active": False})
+
+    default_rows = client.get("/api/themes/summary").json()
+    all_rows = client.get("/api/themes/summary?include_archived=true").json()
+
+    assert all(row["theme_id"] != theme_id for row in default_rows)
+    assert any(row["theme_id"] == theme_id for row in all_rows)
+
+
 def test_theme_detail_returns_404_for_unknown_theme(client):
     """存在しないテーマは404を返す。"""
     assert client.get("/api/themes/9999").status_code == 404
@@ -492,13 +571,62 @@ def test_adding_a_constituent_returns_the_created_row(client, db):
 
     res = client.post(
         f"/api/relationships/themes/{theme_id}/investment-targets",
-        json={"target_id": target_id},
+        json={"target_id": target_id, "reason": "JPXの分類に含まれるため"},
     )
 
     assert res.status_code == 201
     assert res.json()["target_key"] == "6758.T"
     assert res.json()["membership_id"]
     assert res.json()["effective_from"]
+    assert res.json()["added_reason"] == "JPXの分類に含まれるため"
+
+
+def test_archived_theme_rejects_constituent_changes(client, db):
+    """アーカイブは過去定義の保存状態なので、構成を変更できない。"""
+    theme_id, target_id = _seed_theme_and_target(db)
+    client.put(f"/api/themes/{theme_id}", json={"is_active": False})
+
+    added = client.post(
+        f"/api/relationships/themes/{theme_id}/investment-targets",
+        json={"target_id": target_id},
+    )
+
+    assert added.status_code == 409
+    assert "アーカイブ" in added.json()["error"]["message"]
+
+
+def test_catalog_security_can_be_added_to_theme_without_watchlisting(client, db, monkeypatch):
+    """Themeへの一括分類は全銘柄マスタを使い、Watchlist状態を副作用で作らない。"""
+    import duckdb
+
+    from app.routers.domain import relationships as relationship_routes
+
+    catalog = duckdb.connect()
+    catalog.execute("""
+        CREATE VIEW security_master AS
+        SELECT '82670' AS security_key, '82670' AS jpx_code,
+               '8267.T' AS target_key, '架空小売' AS company_name,
+               NULL::VARCHAR AS company_name_english,
+               '011' AS product_category_code,
+               NULL::VARCHAR AS market_code, '東証' AS market_name,
+               NULL::VARCHAR AS sector_17_code, NULL::VARCHAR AS sector_17_name,
+               '6100' AS sector_33_code, '小売業' AS sector_33_name,
+               NULL::VARCHAR AS scale_category
+    """)
+    monkeypatch.setattr(relationship_routes, "get_analytics_connection", lambda: catalog)
+    theme_id = _seed_theme(db, "retail", "小売Pilot")
+
+    first = client.put(f"/api/relationships/themes/{theme_id}/securities/82670")
+    repeated = client.put(f"/api/relationships/themes/{theme_id}/securities/82670")
+
+    assert first.status_code == 200
+    assert first.json()["target_key"] == "8267.T"
+    assert repeated.status_code == 200
+    assert len(client.get(f"/api/relationships/themes/{theme_id}/investment-targets").json()) == 1
+    target_id = first.json()["target_id"]
+    assert db.execute(
+        "SELECT COUNT(*) AS n FROM watchlist_entry WHERE target_id = ?", (target_id,)
+    ).fetchone()["n"] == 0
 
 
 def test_removing_a_constituent_closes_the_membership(client, db):
@@ -509,18 +637,23 @@ def test_removing_a_constituent_closes_the_membership(client, db):
         json={"target_id": target_id},
     )
 
-    res = client.delete(f"/api/relationships/themes/{theme_id}/investment-targets/{target_id}")
+    res = client.request(
+        "DELETE",
+        f"/api/relationships/themes/{theme_id}/investment-targets/{target_id}",
+        json={"reason": "分類誤りのため"},
+    )
 
     assert res.status_code == 204
     rows = client.get(f"/api/relationships/themes/{theme_id}/investment-targets").json()
     assert rows == []
     history = db.execute(
-        "SELECT effective_to FROM theme_investment_target "
+        "SELECT effective_to, removed_reason FROM theme_investment_target "
         "WHERE theme_id = ? AND target_id = ?",
         (theme_id, target_id),
     ).fetchall()
     assert len(history) == 1
     assert history[0]["effective_to"] is not None
+    assert history[0]["removed_reason"] == "分類誤りのため"
 
 
 def test_re_adding_a_removed_constituent_starts_new_membership(client, db):

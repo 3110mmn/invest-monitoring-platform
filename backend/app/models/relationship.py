@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.investment_target import InvestmentTargetRead
 
@@ -15,6 +15,13 @@ class ThemeInvestmentTargetCreate(BaseModel):
     """
 
     target_id: int
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ThemeMembershipChange(BaseModel):
+    """Theme所属を変更した運用上の理由。投資判断のAssessmentとは分離する。"""
+
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class ThemeInvestmentTargetRead(BaseModel):
@@ -23,6 +30,8 @@ class ThemeInvestmentTargetRead(BaseModel):
     target_id: int
     effective_from: datetime
     effective_to: datetime | None = None
+    added_reason: str | None = None
+    removed_reason: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -32,3 +41,4 @@ class ThemeConstituentRead(InvestmentTargetRead):
 
     membership_id: int
     effective_from: datetime
+    added_reason: str | None = None

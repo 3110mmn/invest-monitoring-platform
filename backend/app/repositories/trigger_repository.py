@@ -310,17 +310,22 @@ class TriggerRepository(BaseRepository):
         """
         states = {
             # 一度も確認していない
-            "unhandled": "response_count = 0",
+            "unhandled": "status = 'fired' AND response_count = 0",
             # 未対応、または再確認日が到来した保留
             "actionable": (
-                "(response_count = 0"
+                "status = 'fired' AND (response_count = 0"
                 " OR (latest_response_disposition = 'deferred'"
                 "     AND next_review_on <= CURRENT_DATE))"
             ),
             # 確認したが、再確認日がまだ先
-            "deferred": ("latest_response_disposition = 'deferred' AND next_review_on > CURRENT_DATE"),
+            "deferred": (
+                "status = 'fired' AND latest_response_disposition = 'deferred'"
+                " AND next_review_on > CURRENT_DATE"
+            ),
             # 方針が確定した
-            "settled": "latest_response_disposition IN ('accepted', 'overridden')",
+            "settled": (
+                "status = 'fired' AND latest_response_disposition IN ('accepted', 'overridden')"
+            ),
         }
         if work_state is not None and work_state not in states:
             raise ValueError(f"未対応の work_state: {work_state}")

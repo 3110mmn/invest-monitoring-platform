@@ -28,32 +28,55 @@ def list_themes(is_active: bool | None = None, repo: ThemeRepository = Depends(_
 
 
 @router.get("/summary", response_model=list[ThemeSummaryRead])
-def theme_summary(repo: ThemeRepository = Depends(_repo)):
-    """有効なテーマを構成銘柄数つきで返す。"""
-    return repo.get_theme_summary()
+def theme_summary(
+    include_archived: bool = False,
+    repo: ThemeRepository = Depends(_repo),
+):
+    """テーマを構成銘柄数つきで返す。通常は有効Themeだけを対象にする。"""
+    return repo.get_theme_summary(include_archived=include_archived)
 
 
 @router.post("/", response_model=ThemeRead, status_code=201)
 def create_theme(body: ThemeCreate, repo: ThemeRepository = Depends(_repo)):
-    if repo.find_by_key(body.theme_key):
+    if body.theme_key and repo.find_by_key(body.theme_key):
         raise HTTPException(status_code=409, detail="theme_key already exists")
+    if repo.find_active_by_name(body.theme_name):
+        raise HTTPException(status_code=409, detail="同じ名称の有効なThemeが存在します")
     new_id = repo.create(body.model_dump())
     return repo.find_by_id(new_id)
 
 
 @router.put("/{theme_id}", response_model=ThemeRead)
 def update_theme(theme_id: int, body: ThemeUpdate, repo: ThemeRepository = Depends(_repo)):
-    if not repo.find_by_id(theme_id):
+    current = repo.find_by_id(theme_id)
+    if not current:
         raise HTTPException(status_code=404, detail="Theme not found")
-    repo.update(theme_id, body.model_dump(exclude_none=True))
+    changes = body.model_dump(exclude_none=True)
+    resulting_name = changes.get("theme_name", current["theme_name"])
+    resulting_active = changes.get("is_active", current["is_active"])
+    if resulting_active and repo.find_active_by_name(
+        resulting_name, exclude_theme_id=theme_id
+    ):
+        raise HTTPException(status_code=409, detail="同じ名称の有効なThemeが存在します")
+    repo.update(theme_id, changes)
     return repo.find_by_id(theme_id)
 
 
 @router.delete("/{theme_id}", status_code=204)
 def delete_theme(theme_id: int, repo: ThemeRepository = Depends(_repo)):
-    if not repo.find_by_id(theme_id):
+    theme = repo.find_by_id(theme_id)
+    if not theme:
         raise HTTPException(status_code=404, detail="Theme not found")
-    repo.soft_delete(theme_id)
+    dependencies = repo.deletion_dependencies(theme_id)
+    if any(dependencies.values()):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "構成銘柄の所属履歴またはTrigger設定から参照されているため完全削除できません。"
+                "Themeをアーカイブして履歴を保管してください"
+            ),
+        )
+    repo.hard_delete(theme_id)
 
 
 @router.get("/{theme_id}", response_model=ThemeDetailRead)

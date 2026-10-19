@@ -719,10 +719,19 @@ def test_work_queue_excludes_replay_and_future_deferrals(client, monkeypatch):
 def test_deferred_returns_to_the_queue_when_its_review_date_arrives(client):
     """再確認日が到来した保留は要対応へ戻る。"""
     repo = routes.TriggerRepository
-    assert "next_review_on <= CURRENT_DATE" in inspect.getsource(repo.evaluations)
-    assert "latest_response_disposition = 'deferred' AND next_review_on > CURRENT_DATE" in (
-        inspect.getsource(repo.evaluations)
-    )
+    source = inspect.getsource(repo.evaluations)
+    assert "next_review_on <= CURRENT_DATE" in source
+    assert "latest_response_disposition = 'deferred'" in source
+    assert "next_review_on > CURRENT_DATE" in source
+
+
+def test_work_queue_states_only_include_fired_evaluations():
+    """条件非該当・判定不能は履歴には残すが、人間の対応キューへ入れない。"""
+    source = inspect.getsource(routes.TriggerRepository.evaluations)
+
+    for state in ("unhandled", "actionable", "deferred", "settled"):
+        assert f'"{state}"' in source
+    assert source.count("status = 'fired'") >= 4
 
 
 def test_multiple_comparisons_share_a_single_query():

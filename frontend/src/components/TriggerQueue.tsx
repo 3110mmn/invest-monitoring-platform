@@ -19,6 +19,9 @@ export default function TriggerQueue() {
   const pending = rows.filter((row) => row.response_count === 0);
   const due = rows.filter((row) => row.next_review_on != null && row.next_review_on <= today);
   const visible = [...pending, ...due.filter((row) => !pending.some((item) => item.evaluation_id === row.evaluation_id))];
+  const firedAt = (value: string) => new Intl.DateTimeFormat("ja-JP", {
+    dateStyle: "short", timeStyle: "short", timeZone: "Asia/Tokyo",
+  }).format(new Date(value));
   return <div className="mt-2 space-y-2">
     {error ? <p role="alert" className="text-sm text-red-700">発火履歴を取得できませんでした：{error}</p>
       : visible.length ? visible.slice(0, 5).map((row) => <p key={row.evaluation_id} className="text-sm">
@@ -28,6 +31,7 @@ export default function TriggerQueue() {
             : `${row.conditions.length}条件（${row.logic_operator === "all" ? "すべて" : "いずれか"}）`}
         </Link>
         {row.response_count === 0 ? "（未対応）" : "（次回確認日到来）"}
+        <span className="ml-2 text-gray-500">発火日時：{firedAt(row.evaluated_at)}</span>
       </p>) : <p className="text-sm text-gray-600">対応が必要な実運用トリガーはありません。</p>}
   </div>;
 }

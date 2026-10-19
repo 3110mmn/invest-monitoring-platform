@@ -14,7 +14,6 @@
 
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -185,36 +184,21 @@ def stale_migration_head(path: Path) -> list[tuple[int, str, str]]:
     return problems
 
 
-COUNTED_CLAIMS: dict[str, tuple[str, str]] = {
-    r"バックエンドテスト([0-9,]+)件": (
-        "backend/tests",
-        "pytestの収集数。`python -m pytest backend/tests -q --collect-only` で数えられる",
-    ),
-}
+# テストの件数は書かない。読み手には「348件」が多いのか少ないのか、
+# そのテストが何を守っているのかが分からず、情報量がほぼ無い。一方でコミット
+# するたびに腐り、同じREADME内で348件と293件が同居していたこともある。
+# 伝える価値があるのは件数ではなく「実PostgreSQLに対して実行する」という性質。
+TEST_COUNT_CLAIM = re.compile(r"(?:バックエンド|フロントエンド|backend|frontend)?\s*"
+                              r"テスト\s*[0-9,]+\s*件")
 
 
-def collect_test_count() -> int | None:
-    """pytestの収集数を返す。失敗したら検査を飛ばす。"""
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "backend/tests", "-q", "--collect-only"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    match = re.search(r"(\d+) tests? collected", result.stdout)
-    return int(match.group(1)) if match else None
-
-
-def stale_counts(path: Path, actual: int | None) -> list[tuple[int, str, int]]:
-    """文書に書かれた件数と実測のずれを返す。"""
-    if actual is None:
-        return []
-    problems: list[tuple[int, str, int]] = []
-    for pattern in COUNTED_CLAIMS:
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            match = re.search(pattern, line)
-            if match and int(match.group(1).replace(",", "")) != actual:
-                problems.append((number, match.group(0), actual))
+def test_count_claims(path: Path) -> list[tuple[int, str]]:
+    """テスト件数の記述を返す。書いた時点で腐り始めるため置かない。"""
+    problems: list[tuple[int, str]] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        match = TEST_COUNT_CLAIM.search(line)
+        if match:
+            problems.append((number, match.group(0)))
     return problems
 
 
@@ -223,7 +207,6 @@ def main() -> int:
     path_problems: list[str] = []
     term_problems: list[str] = []
     count_problems: list[str] = []
-    actual_tests = collect_test_count()
 
     for path in target_files():
         shown = path.relative_to(REPO_ROOT)
@@ -233,8 +216,10 @@ def main() -> int:
             path_problems.append(f"  {shown}:{number} `{candidate}`")
         for number, term, reason in forbidden_terms(path):
             term_problems.append(f"  {shown}:{number} 「{term}」— {reason}")
-        for number, written, actual in stale_counts(path, actual_tests):
-            count_problems.append(f"  {shown}:{number} 「{written}」— 実測は{actual}件")
+        for number, written in test_count_claims(path):
+            count_problems.append(
+                f"  {shown}:{number} 「{written}」— 件数は書かない（腐る。性質を書く）"
+            )
         for number, written, head in stale_migration_head(path):
             count_problems.append(f"  {shown}:{number} 「{written}」— 現在のheadは{head}")
 
@@ -251,9 +236,9 @@ def main() -> int:
         print("\n  経緯として言及する必要がある場合は check_docs.py の ALLOWED_CONTEXT へ追加する")
 
     if count_problems:
-        print("実測と合わない件数:")
+        print("腐る数値の記述:")
         print("\n".join(count_problems))
-        print("\n  数え直して直してください")
+        print("\n  実測して確かめられる数値は、増減すると黙って嘘になる。性質を書く")
 
     if link_problems or path_problems or term_problems or count_problems:
         return 1

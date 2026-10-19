@@ -48,6 +48,7 @@
 | `ingestion_error` | ETL内部生成 | 取得・正規化・検証・保存時のエラー記録 |
 | `investment_target_identifier` | 外部API・システム変換 | 銘柄マスタ同期、識別子管理処理 |
 | `theme_investment_target` | ユーザー入力 | Relationship API |
+| `theme_membership_import` | ユーザー入力（CSV原本） | Theme構成取込スクリプト。CSVの参照先とSHA-256、時点、差分件数を記録 |
 | `trigger_rule` | ユーザー入力 | Trigger API。Ruleの安定した同一性と有効状態 |
 | `trigger_rule_version` | ユーザー入力 | Trigger API。条件変更時に新versionを追記 |
 | `trigger_rule_condition` | ユーザー入力 | Trigger API。Rule version内の条件を順序付きで追記 |
@@ -81,6 +82,7 @@
 | 取得基盤 | `ingestion_error` | 1実行内の1エラー |
 | 識別子 | `investment_target_identifier` | 1銘柄の1外部識別子と有効期間 |
 | 関連履歴 | `theme_investment_target` | 1テーマと1銘柄の1所属期間 |
+| 関連履歴来歴 | `theme_membership_import` | 1テーマへの1回のCSV取込 |
 | Strategy | `trigger_rule` | 1つの継続監視Ruleの安定した同一性 |
 | Strategy履歴 | `trigger_rule_version` | 1 Ruleの条件結合・方針を固定したversion |
 | Strategy条件 | `trigger_rule_condition` | 1 Rule versionを構成する1条件 |
@@ -344,10 +346,10 @@ Mandate自体を改訂すると旧versionの現行Assignmentを終了し、新ve
 | 列 | 定義 |
 | --- | --- |
 | `theme_id` | 主キー |
-| `theme_key` | システム内で不変のテーマキー。一意 |
+| `theme_key` | システム内で不変のテーマキー。一意。通常はDBが`theme-000001`形式で自動採番し、再実行識別が必要なETLだけ明示可能 |
 | `theme_name` | 表示名 |
-| `description` | 投資テーマの説明 |
-| `is_active` | 有効フラグ |
+| `description` | Themeの定義・グルーピング基準。構造化された生成根拠は将来のMembership Ruleへ分離する |
+| `is_active` | `TRUE`は利用中、`FALSE`はアーカイブ済み。物理列名は後方互換のため維持 |
 | `created_at`, `updated_at` | 作成・更新日時 |
 
 ### `investment_target`
@@ -455,6 +457,10 @@ Action／Position取り込みで判定し、Watchlistの状態からは推定し
 | `theme_id`, `target_id` | テーマと銘柄 |
 | `effective_from` | 所属開始日時 |
 | `effective_to` | 所属終了日時。現在所属中なら `NULL` |
+| `added_reason` | この分類・Universeへ追加した運用上の理由。任意 |
+| `removed_reason` | この分類・Universeから除外した運用上の理由。任意 |
+| `added_import_id` | CSV取込で追加された場合の`theme_membership_import.import_id`。手動追加は`NULL` |
+| `removed_import_id` | CSV取込で終了した場合の`theme_membership_import.import_id`。手動解除は`NULL` |
 | `created_at`, `updated_at` | 作成・更新日時 |
 
 `effective_to`は`NULL`、または`effective_from`以後でなければなりません。同じ`theme_id`と
@@ -465,8 +471,30 @@ Relationship APIで追加すると、現在行がなければ新しいmembership
 ある場合は重複行を作りません。解除時は現在行の`effective_to`と`updated_at`を更新し、行自体は
 削除しません。
 
-`basket_weight`と`rationale`はMasterへ保存しません。ウェイトは配分判断、採用理由はAssessmentに
-属するため、Assessment / Decisionのversion・actor・evidence設計が確定した段階で別テーブルへ追加します。
+`added_reason`と`removed_reason`は「CSV掲載」「分類誤り」などMembershipを変更した運用上の理由です。
+投資対象として魅力的か、売買対象として採用するかというAssessment上の理由とは区別します。
+`basket_weight`や投資判断上の採用理由はこのMasterへ保存しません。
+
+### `theme_membership_import`
+
+Theme構成CSVの取込単位と、時点付き差分の来歴を保持します。CSV原本はDB外に置き、参照先と
+SHA-256を保存します。
+
+| 列 | 定義 |
+| --- | --- |
+| `import_id` | 取込実行の主キー |
+| `theme_id` | 対象Theme |
+| `snapshot_at` | CSVが表す構成基準日時。Membershipの開始・終了時刻にも使用 |
+| `import_mode` | `append`は追加のみ、`replace`はCSVを当該時点の全構成として差分同期 |
+| `artifact_name`, `artifact_ref`, `artifact_hash` | CSV原本の名称、参照先、SHA-256 |
+| `rationale` | 取込理由。任意 |
+| `actor` | 取込主体 |
+| `input_count` | CSVから解決できた対象数 |
+| `added_count`, `removed_count`, `unchanged_count` | 差分件数 |
+| `imported_at` | 実際の取込日時 |
+
+同じ`theme_id × snapshot_at × import_mode × artifact_hash`は一度だけ取り込みます。`replace`は
+CSVにない現在Membershipを終了するため、`--snapshot-at`の明示を必須とします。
 
 ## 7. 時系列データ
 
@@ -475,7 +503,10 @@ Relationship APIで追加すると、現在行がなければ新しいmembership
 
 ## 9. 削除・履歴保持方針
 
-- テーマは原則物理削除せず、`is_active = FALSE`にします。投資対象の監視停止は
+- Themeを新しい分析・Trigger設定で使わない場合は`is_active = FALSE`としてアーカイブします。
+  誤登録などで不要になった未参照Themeは、有効状態からでも物理削除できます。構成銘柄の所属履歴または
+  Trigger設定から参照されるThemeは、来歴を保全するため物理削除できず、アーカイブして残します。
+  アーカイブ済みThemeへ新しい構成銘柄は追加できません。投資対象の監視停止は
   `watchlist_entry.status = 'paused'`、Watchlistからの除外はその行の削除で表します。
 - テーマと銘柄の所属解除は物理削除せず、現在行の`effective_to`を設定します。
 - 時系列、取込履歴、財務開示は再現性確保のため履歴を保持します。

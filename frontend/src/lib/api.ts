@@ -27,7 +27,8 @@ export { ApiError } from "./http";
 export const getThemes = (isActive?: boolean) =>
   request<Theme[]>(`/themes${isActive != null ? `?is_active=${isActive}` : ""}`);
 
-export const getThemeSummary = () => request<ThemeSummary[]>("/themes/summary");
+export const getThemeSummary = (includeArchived = false) =>
+  request<ThemeSummary[]>(`/themes/summary${includeArchived ? "?include_archived=true" : ""}`);
 
 export const getTheme = (id: number) => request<ThemeDetail>(`/themes/${id}`);
 
@@ -109,10 +110,18 @@ export const addThemeInvestmentTarget = (
     body: JSON.stringify(body),
   });
 
+/** 全銘柄マスタの銘柄をThemeへ追加する。Watchlistには追加しない。 */
+export const addThemeSecurity = (themeId: number, securityKey: string, reason?: string) =>
+  request<ThemeConstituent>(
+    `/relationships/themes/${themeId}/securities/${encodeURIComponent(securityKey)}`,
+    { method: "PUT", body: JSON.stringify({ reason: reason || null }) },
+  );
+
 /** テーマから銘柄を外す。現在の所属期間を閉じ、履歴行は残す。 */
-export const removeThemeInvestmentTarget = (themeId: number, targetId: number) =>
+export const removeThemeInvestmentTarget = (themeId: number, targetId: number, reason?: string) =>
   request<void>(`/relationships/themes/${themeId}/investment-targets/${targetId}`, {
     method: "DELETE",
+    body: JSON.stringify({ reason: reason || null }),
   });
 
 // ---- Data Management ----
